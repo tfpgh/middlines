@@ -1,6 +1,6 @@
 # middlines
 
-Real-time dining hall line tracking for Middlebury.
+Real-time dining hall line tracking for Middlebury College.
 
 ## Architecture
 ```
