@@ -9,7 +9,7 @@ Real-time dining hall line tracking for Middlebury College.
 │  (Ross)         │      │  (Atwater)      │      │  (Proctor)      │
 └────────┬────────┘      └────────┬────────┘      └────────┬────────┘
          │                        │                        │
-         │ MQTT: middlines/{location}/count                │
+         │        MQTT: middlines/{location}/count         │
          └────────────────────────┼────────────────────────┘
                                   ▼
                        ┌─────────────────────┐
