@@ -20,33 +20,40 @@ Real-time dining hall line tracking for Middlebury College.
                                   ▼
                        ┌─────────────────────┐
                        │  Ingester (Python)  │
-                       │                     │
+                       │  - Smoothing view   │
                        └──────────┬──────────┘
                                   │ write
                                   ▼
-                       ┌─────────────────────┐
-                       │  SQLite             │
-                       │  /data/middlines.db │
-                       └──────────┬──────────┘
-                                  │ read
-                                  ▼
-                       ┌─────────────────────┐
-                       │  FastAPI            │
-                       │  :8000              │
-                       └──────────┬──────────┘
-                                  │ /api/*
-                                  ▼
-                       ┌─────────────────────┐
-                       │  Nginx              │
-                       │  :80                │
-                       │  - /api/* → api     │
-                       │  - /* → static      │
-                       └──────────┬──────────┘
-                                  │
-                                  ▼
-                       ┌─────────────────────┐
-                       │ Vite React Frontend │
-                       └─────────────────────┘
+                       ┌──────────────────────────────────┐
+                       │  SQLite (/data/middlines.db)     │
+                       │  ┌────────────┐  ┌─────────────┐ │
+                       │  │ Raw Counts │  │ Aggregator  │ │
+                       │  │ (smoothed) │  │   Tables    │ │
+                       │  └────────────┘  │ - baselines │ │
+                       │                  │ - max_count │ │
+                       │                  │ - averages  │ │
+                       │                  └─────────────┘ │
+                       └───┬──────────────────────────┬───┘
+                           │ read/write               │ read
+                  ┌────────┘                          └────────┐
+                  ▼                                            ▼
+       ┌─────────────────────┐                      ┌─────────────────────┐
+       │  Aggregator         │                      │  FastAPI            │
+       │  (daily 4:15 AM)    │                      │  :8000              │
+       │  - Compute baselines│                      └──────────┬──────────┘
+       │  - Compute max count│                                 │ /api/*
+       │  - Time averages    │                                 ▼
+       └─────────────────────┘                      ┌─────────────────────┐
+                                                    │  Nginx              │
+                                                    │  :80                │
+                                                    │  - /api/* → api     │
+                                                    │  - /* → static      │
+                                                    └──────────┬──────────┘
+                                                              │
+                                                              ▼
+                                                    ┌─────────────────────┐
+                                                    │ Vite React Frontend │
+                                                    └─────────────────────┘
 ```
 
 ## Development Setup
@@ -76,11 +83,27 @@ docker exec mosquitto mosquitto_sub -t "middlines/#" -v
 docker exec mosquitto mosquitto_pub -t "middlines/ross/count" -m "42"
 ```
 
+## Data Processing
+
+**Ingester Service:**
+- Subscribes to MQTT topics and writes raw counts to SQLite
+- Creates a `smoothed_counts` view with rolling average to reduce noise
+- Seeds database with realistic test data (full month of November 2025 with meal-time patterns)
+
+**Aggregator Service:**
+- Runs daily at 4:15 AM to compute derived statistics:
+  - **Baselines**: Nighttime (1-3 AM) averages to detect when halls are closed
+  - **Max Counts**: 99th percentile counts for each location (baseline-adjusted)
+  - **Time Averages**: Average counts by location/day/time bucket for "vs typical" comparisons
+- Uses 45-day lookback window for calculations
+- Stores results in dedicated tables (`baseline`, `max_count`, `time_averages`)
+
 ## Project Structure
 ```
 middlines/
 ├── services/
-│   ├── ingester/    # MQTT → SQLite
+│   ├── ingester/    # MQTT → SQLite with data smoothing
+│   ├── aggregator/  # Daily statistical aggregation
 │   └── api/         # FastAPI data serving backend
 ├── frontend/        # Nginx + React + Vite
 ├── mosquitto/       # MQTT broker config
