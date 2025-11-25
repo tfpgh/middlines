@@ -1,0 +1,30 @@
+[project]
+name = "middlines"
+version = "0.1.0"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = []
+
+[tool.uv.workspace]
+members = [
+    "services/*",
+]
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.5.0",
+    "pyright[nodejs]>=1.1.407",
+    "ruff>=0.14.6",
+]
+
+[tool.ruff]
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "PTH"]
+
+[tool.pyright]
+pythonVersion = "3.14"
+typeCheckingMode = "all"
+venvPath = "."
+venv = ".venv"
