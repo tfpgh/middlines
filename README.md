@@ -81,7 +81,7 @@ docker exec mosquitto mosquitto_pub -t "middlines/ross/count" -m "42"
 middlines/
 ├── services/
 │   ├── ingester/    # MQTT → SQLite
-│   └── api/         # FastAPI backend
+│   └── api/         # FastAPI data serving backend
 ├── frontend/        # Nginx + React + Vite
 ├── mosquitto/       # MQTT broker config
 └── data/            # SQLite database (gitignored)
