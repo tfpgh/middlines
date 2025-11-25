@@ -49,8 +49,8 @@ Real-time dining hall line tracking for Middlebury College.
                                                     │  - /api/* → api     │
                                                     │  - /* → static      │
                                                     └──────────┬──────────┘
-                                                              │
-                                                              ▼
+                                                               │
+                                                               ▼
                                                     ┌─────────────────────┐
                                                     │ Vite React Frontend │
                                                     └─────────────────────┘
