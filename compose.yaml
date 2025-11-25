@@ -11,6 +11,12 @@ services:
       - mosquitto
     volumes:
       - ./data:/data
+  aggregator:
+    build: ./services/aggregator
+    depends_on:
+      - ingester
+    volumes:
+      - ./data:/data
   api:
     build: ./services/api
     ports:

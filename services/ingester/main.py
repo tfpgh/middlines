@@ -15,6 +15,9 @@ MQTT_PORT = 1883
 DATABASE_PATH = "/data/middlines.db"
 TOPIC = "middlines/+/count"
 
+# Number of rows to smooth over in smoothed_counts. 5 rows at 2 min intervals is 10 min average
+SMOOTHING_WINDOW_ROWS = 5
+
 
 # Seeds the DB with some realistic test data
 def seed_db(conn: sqlite3.Connection) -> None:
@@ -26,6 +29,11 @@ def seed_db(conn: sqlite3.Connection) -> None:
 
     # Generate weekday count with meal rushes
     def get_weekday_count(hour: int, minute: int) -> int:
+        # Closed hours: before 7 AM or after 8 PM
+        if hour < 7 or hour >= 20:
+            noise = random.randint(-2, 2)
+            return max(0, 3 + noise)
+
         t = hour + minute / 60.0
         base_traffic = 10
 
@@ -46,6 +54,11 @@ def seed_db(conn: sqlite3.Connection) -> None:
 
     # Generate weekend count with lower and flatter traffic
     def get_weekend_count(hour: int, minute: int) -> int:
+        # Closed hours: before 7 AM or after 8 PM
+        if hour < 7 or hour >= 20:
+            noise = random.randint(-2, 2)
+            return max(0, 3 + noise)
+
         t = hour + minute / 60.0
         base_traffic = 5
 
@@ -70,7 +83,7 @@ def seed_db(conn: sqlite3.Connection) -> None:
     data: list[tuple[str, int, str]] = []
     for day in range(1, 31):  # November 1-30
         is_weekend = is_weekend_day(day)
-        for hour in range(7, 22):
+        for hour in range(24):
             for minute in range(60):
                 timestamp = f"2025-11-{day:02d} {hour:02d}:{minute:02d}:00"
                 count = get_count(hour, minute, is_weekend)
@@ -105,6 +118,23 @@ def init_db() -> None:
         logger.info(f"Database initialized at {DATABASE_PATH}")
     else:
         logger.info(f"Database already exists at {DATABASE_PATH}")
+
+    # Create (or recreate) the smoothed view
+    conn.execute("DROP VIEW IF EXISTS smoothed_counts")
+    conn.execute(f"""
+            CREATE VIEW smoothed_counts AS
+            SELECT
+                location,
+                timestamp,
+                AVG(count) OVER (
+                    PARTITION BY location
+                    ORDER BY timestamp
+                    ROWS BETWEEN {SMOOTHING_WINDOW_ROWS - 1} PRECEDING AND CURRENT ROW
+                ) as smoothed_count
+            FROM counts
+        """)
+    conn.commit()
+    logger.info("Smoothed counts view created")
 
     conn.close()
 
