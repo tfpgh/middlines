@@ -1,10 +1,15 @@
+import os
 import sqlite3
+from datetime import datetime, timedelta
 from time import sleep, time
+from zoneinfo import ZoneInfo
 
 import schedule
 from loguru import logger
 
 DATABASE_PATH = "/data/middlines.db"
+
+TIMEZONE = ZoneInfo(os.environ.get("TZ", "America/New_York"))
 
 # The max count isn't a true max, it's at a percentile. Here we choose the 99th percentile.
 MAX_PERCENTILE_THRESHOLD = 0.99
@@ -52,16 +57,22 @@ def compute_baselines() -> None:
 
     conn = sqlite3.connect(DATABASE_PATH)
 
-    conn.execute("""
+    cutoff_time = datetime.now(TIMEZONE) - timedelta(days=1)
+    cutoff_str = cutoff_time.isoformat(sep=" ", timespec="seconds")
+
+    conn.execute(
+        """
         INSERT OR REPLACE INTO baseline (location, baseline_count)
         SELECT
             location,
             AVG(smoothed_count) as baseline_count
         FROM smoothed_counts
-        WHERE CAST(strftime('%H', timestamp) as INTEGER) IN (1, 3)
-            AND timestamp > datetime('now', '-24 hours')
+        WHERE CAST(strftime('%H', timestamp) as INTEGER) IN (1, 2, 3)
+            AND timestamp > ?
         GROUP BY location
-    """)
+    """,
+        (cutoff_str,),
+    )
 
     location_count = conn.total_changes
     conn.commit()
@@ -76,6 +87,9 @@ def compute_max_counts() -> None:
 
     conn = sqlite3.connect(DATABASE_PATH)
 
+    lookback_time = datetime.now(TIMEZONE) - timedelta(days=LOOKBACK_LENGTH)
+    lookback_str = lookback_time.isoformat(sep=" ", timespec="seconds")
+
     conn.execute(
         """
             WITH ranked_counts AS (
@@ -86,7 +100,7 @@ def compute_max_counts() -> None:
                     COUNT(*) OVER (PARTITION BY c.location) as total_count
                 FROM smoothed_counts c
                 JOIN baseline b ON c.location = b.location
-                WHERE c.timestamp > datetime('now', '-' || ? || ' days')
+                WHERE c.timestamp > ?
                   AND c.smoothed_count > b.baseline_count * ?
             ),
             percentile_max AS (
@@ -104,7 +118,7 @@ def compute_max_counts() -> None:
             FROM percentile_max p
             LEFT JOIN baseline b ON p.location = b.location
         """,
-        (LOOKBACK_LENGTH, CLOSED_THRESHOLD, MAX_PERCENTILE_THRESHOLD),
+        (lookback_str, CLOSED_THRESHOLD, MAX_PERCENTILE_THRESHOLD),
     )
 
     location_count = conn.total_changes
@@ -121,6 +135,10 @@ def compute_time_averages() -> None:
     logger.info("Computing time averages")
 
     conn = sqlite3.connect(DATABASE_PATH)
+
+    lookback_time = datetime.now(TIMEZONE) - timedelta(days=LOOKBACK_LENGTH)
+    lookback_str = lookback_time.isoformat(sep=" ", timespec="seconds")
+
     conn.execute(
         """
             INSERT OR REPLACE INTO time_averages
@@ -133,11 +151,11 @@ def compute_time_averages() -> None:
                 AVG(c.smoothed_count) as mean_count
             FROM smoothed_counts c
             JOIN baseline b ON c.location = b.location
-            WHERE c.timestamp > datetime('now', '-' || ? || ' days')
+            WHERE c.timestamp > ?
               AND c.smoothed_count > b.baseline_count * ?
             GROUP BY c.location, day_of_week, time_bucket
         """,
-        (TIME_BUCKET_SIZE, TIME_BUCKET_SIZE, LOOKBACK_LENGTH, CLOSED_THRESHOLD),
+        (TIME_BUCKET_SIZE, TIME_BUCKET_SIZE, lookback_str, CLOSED_THRESHOLD),
     )
 
     bucket_count = conn.total_changes

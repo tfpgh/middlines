@@ -1,14 +1,18 @@
+import os
 import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI
 from loguru import logger
 from pydantic import BaseModel
 
 DATABASE_PATH = "/data/middlines.db"
+
+TIMEZONE = ZoneInfo(os.environ.get("TZ", "America/New_York"))
 
 # Compare last N minutes to previous N minutes for trend
 TREND_WINDOW_MINUTES = 10

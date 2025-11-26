@@ -1,7 +1,10 @@
 import math
+import os
 import random
 import sqlite3
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import paho.mqtt.client as mqtt
 from loguru import logger
@@ -9,6 +12,8 @@ from paho.mqtt.client import ConnectFlags, MQTTMessage
 from paho.mqtt.enums import CallbackAPIVersion
 from paho.mqtt.properties import Properties
 from paho.mqtt.reasoncodes import ReasonCode
+
+TIMEZONE = ZoneInfo(os.environ.get("TZ", "America/New_York"))
 
 MQTT_HOST = "mosquitto"
 MQTT_PORT = 1883
@@ -85,7 +90,8 @@ def seed_db(conn: sqlite3.Connection) -> None:
         is_weekend = is_weekend_day(day)
         for hour in range(24):
             for minute in range(60):
-                timestamp = f"2025-11-{day:02d} {hour:02d}:{minute:02d}:00"
+                dt = datetime(2025, 11, day, hour, minute, 0, tzinfo=TIMEZONE)
+                timestamp = dt.isoformat(sep=" ", timespec="seconds")
                 count = get_count(hour, minute, is_weekend)
                 data.append(("Generated Test", count, timestamp))
 
@@ -110,7 +116,7 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 location TEXT NOT NULL,
                 count INTEGER NOT NULL,
-                timestamp TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                timestamp TEXT NOT NULL
             );""")
         conn.commit()
 
@@ -160,10 +166,13 @@ def on_message(
         location = msg.topic.split("/")[1]
         count = int(msg.payload.decode())
 
+        local_now = datetime.now(TIMEZONE)
+        timestamp = local_now.isoformat(sep=" ", timespec="seconds")
+
         conn = sqlite3.connect(DATABASE_PATH)
         conn.execute(
-            "INSERT INTO counts (location, count) VALUES (?, ?)",
-            (location, count),
+            "INSERT INTO counts (location, count, timestamp) VALUES (?, ?, ?)",
+            (location, count, timestamp),
         )
         conn.commit()
         conn.close()

@@ -1,3 +1,6 @@
+x-shared-environment: &shared-environment
+  TZ: America/New_York
+
 services:
   mosquitto:
     image: eclipse-mosquitto:2
@@ -5,27 +8,37 @@ services:
       - 1883:1883
     volumes:
       - ./mosquitto/config:/mosquitto/config:ro
+    environment:
+      <<: *shared-environment
   ingester:
     build: ./services/ingester
     depends_on:
       - mosquitto
     volumes:
       - ./data:/data
+    environment:
+      <<: *shared-environment
   aggregator:
     build: ./services/aggregator
     depends_on:
       - ingester
     volumes:
       - ./data:/data
+    environment:
+      <<: *shared-environment
   api:
     build: ./services/api
     ports:
       - 8000:8000
     volumes:
       - ./data:/data
+    environment:
+      <<: *shared-environment
   frontend:
     build: ./frontend
     ports:
       - "80:80"
     depends_on:
       - api
+    environment:
+      <<: *shared-environment
