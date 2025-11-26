@@ -7,6 +7,7 @@ from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, HTTPException
+from fastapi.middleware.gzip import GZipMiddleware
 from loguru import logger
 from pydantic import BaseModel
 
@@ -32,6 +33,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(lifespan=lifespan, root_path="/api")
+
+app.add_middleware(GZipMiddleware)
 
 
 def get_db() -> Generator[sqlite3.Connection]:
