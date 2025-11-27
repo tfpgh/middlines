@@ -92,7 +92,7 @@ export function DiningHallCard({ location }: DiningHallCardProps) {
 
         {/* Expanded Chart */}
         {isExpanded && hasHistoricalData && (
-          <div className="pt-4 border-t">
+          <div className="pt-4 border-t overflow-hidden">
             {isClosed && (
               <p className="text-sm text-muted-foreground mb-2">Today's Activity</p>
             )}
