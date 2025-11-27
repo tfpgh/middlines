@@ -23,7 +23,7 @@ TREND_LOOKBACK_ROWS = 5
 # Trend threshold - decimal change to determine increasing/decreasing (0.07 = 7%)
 TREND_THRESHOLD = 0.07
 
-TIME_BUCKET_SIZE = 10
+TIME_BUCKET_SIZE = int(os.environ.get("TIME_BUCKET_SIZE", "10"))
 
 # Seconds
 CACHE_TTL = 30

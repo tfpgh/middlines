@@ -18,7 +18,7 @@ LOOKBACK_LENGTH = 45
 # How many times the baseline a count can be for the hall to be considered closed
 CLOSED_THRESHOLD = 1.5
 # Average count bucket sizes in minutes
-TIME_BUCKET_SIZE = 10
+TIME_BUCKET_SIZE = int(os.environ.get("TIME_BUCKET_SIZE", "10"))
 
 
 # Compute baselines from last night's 1-4am readings
