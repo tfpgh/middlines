@@ -1,9 +1,11 @@
+import { ThemeProvider } from '@/components/theme-provider'
+import { DiningHallDashboard } from '@/components/dining-hall-dashboard'
+
 function App() {
   return (
-    <div>
-      <h1>Middlines</h1>
-      <p>Real-time dining hall line tracking for Middlebury College</p>
-    </div>
+    <ThemeProvider defaultTheme="system" storageKey="middlines-theme">
+      <DiningHallDashboard />
+    </ThemeProvider>
   )
 }
 
