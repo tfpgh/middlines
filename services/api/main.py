@@ -1,4 +1,3 @@
-import json
 import os
 import sqlite3
 from collections.abc import AsyncIterator, Generator
@@ -14,21 +13,27 @@ from loguru import logger
 from pydantic import BaseModel
 
 DATABASE_PATH = "/data/middlines.db"
-
 TIMEZONE = ZoneInfo(os.environ.get("TZ", "America/New_York"))
 
-# Trend calculation - compare current to N rows back
-TREND_LOOKBACK_ROWS = 5
-
-# Trend threshold - decimal change to determine increasing/decreasing (0.07 = 7%)
-TREND_THRESHOLD = 0.07
-
-TIME_BUCKET_SIZE = int(os.environ.get("TIME_BUCKET_SIZE", "10"))
-
-# Seconds
+# Cache TTL in seconds
 CACHE_TTL = 30
 
+# Trend: compare current count to N rows back
+TREND_LOOKBACK_ROWS = 5
+# Trend: percentage change threshold to determine increasing/decreasing
+TREND_THRESHOLD = 0.07
 
+# Aggregation: time bucket size in minutes
+TIME_BUCKET_SIZE = 10
+# Aggregation: days of historical data to consider
+LOOKBACK_DAYS = 45
+# Aggregation: percentile for max count calculation (0.99 = 99th percentile)
+MAX_PERCENTILE = 0.99
+# Aggregation: multiplier of baseline below which location is considered closed
+CLOSED_THRESHOLD = 1.5
+
+
+# Response Models
 class DataPoint(BaseModel):
     timestamp: datetime
     busyness_percentage: float | None
@@ -43,7 +48,196 @@ class LocationStatus(BaseModel):
     today_data: list[DataPoint]
 
 
-# Simple cache: (timestamp, data) or None
+# Internal Models
+class SmoothedCount(BaseModel):
+    location: str
+    timestamp: datetime
+    count: float
+
+
+class LocationAggregates(BaseModel):
+    baseline: float
+    max_count: float  # baseline-adjusted
+    time_averages: dict[tuple[int, int], float]  # (day_of_week, time_bucket) -> mean
+
+
+def _compute_aggregates(
+    counts: list[SmoothedCount],
+) -> dict[str, LocationAggregates]:
+    now = datetime.now(TIMEZONE)
+    yesterday = now - timedelta(days=1)
+    lookback_start = now - timedelta(days=LOOKBACK_DAYS)
+
+    # Group counts by location
+    by_location: dict[str, list[SmoothedCount]] = {}
+    for c in counts:
+        by_location.setdefault(c.location, []).append(c)
+
+    result: dict[str, LocationAggregates] = {}
+
+    for location, location_counts in by_location.items():
+        # 1. Baseline: average of 1-4 AM readings from last 24 hours
+        baseline_counts = [
+            c.count
+            for c in location_counts
+            if c.timestamp > yesterday and c.timestamp.hour in set(range(1, 4))
+        ]
+        baseline = sum(baseline_counts) / len(baseline_counts) if baseline_counts else 0
+
+        # 2. Max count: 99th percentile of counts above closed threshold
+        open_counts = sorted(
+            c.count
+            for c in location_counts
+            if c.timestamp > lookback_start and c.count > baseline * CLOSED_THRESHOLD
+        )
+        if open_counts:
+            percentile_idx = int(len(open_counts) * MAX_PERCENTILE)
+            percentile_idx = min(percentile_idx, len(open_counts) - 1)
+            max_count = open_counts[percentile_idx] - baseline
+        else:
+            max_count = 0
+
+        # 3. Time averages: mean count by (day_of_week, time_bucket)
+        time_buckets: dict[tuple[int, int], list[float]] = {}
+        for c in location_counts:
+            if c.timestamp <= lookback_start:
+                continue
+            if c.count <= baseline * CLOSED_THRESHOLD:
+                continue
+            day_of_week = c.timestamp.weekday()
+            # Convert to Sunday=0 format to match original SQL strftime('%w')
+            day_of_week = (day_of_week + 1) % 7
+            minutes = (
+                c.timestamp.hour * 60
+                + (c.timestamp.minute // TIME_BUCKET_SIZE) * TIME_BUCKET_SIZE
+            )
+            key = (day_of_week, minutes)
+            time_buckets.setdefault(key, []).append(c.count)
+
+        time_averages = {k: sum(v) / len(v) for k, v in time_buckets.items()}
+
+        result[location] = LocationAggregates(
+            baseline=baseline,
+            max_count=max_count,
+            time_averages=time_averages,
+        )
+
+    return result
+
+
+def _calculate_busyness(
+    count: float | None,
+    baseline: float | None,
+    max_count: float | None,
+) -> float | None:
+    if count is None or baseline is None or max_count is None or max_count <= 0:
+        return None
+    busyness = ((count - baseline) / max_count) * 100
+    return max(0.0, min(100.0, busyness))
+
+
+def _build_location_status(db: sqlite3.Connection) -> list[LocationStatus]:
+    now = datetime.now(TIMEZONE)
+    midnight_today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    lookback_start = now - timedelta(days=LOOKBACK_DAYS)
+
+    # Fetch all smoothed counts within lookback window
+    rows = db.execute(
+        """
+        SELECT location, timestamp, smoothed_count
+        FROM smoothed_counts
+        WHERE timestamp >= ?
+        ORDER BY location, timestamp
+        """,
+        (lookback_start.isoformat(sep=" ", timespec="seconds"),),
+    ).fetchall()
+
+    if not rows:
+        raise HTTPException(status_code=503, detail="No data available")
+
+    counts = [
+        SmoothedCount(
+            location=row["location"],
+            timestamp=datetime.fromisoformat(row["timestamp"]),
+            count=row["smoothed_count"],
+        )
+        for row in rows
+    ]
+
+    aggregates = _compute_aggregates(counts)
+
+    # Group counts by location for building response
+    by_location: dict[str, list[SmoothedCount]] = {}
+    for c in counts:
+        by_location.setdefault(c.location, []).append(c)
+
+    results: list[LocationStatus] = []
+
+    for location, location_counts in sorted(by_location.items()):
+        agg = aggregates.get(location)
+        if not agg:
+            continue
+
+        # Get latest count and past count for trend
+        latest = location_counts[-1]
+        past_count = (
+            location_counts[-1 - TREND_LOOKBACK_ROWS].count
+            if len(location_counts) > TREND_LOOKBACK_ROWS
+            else None
+        )
+
+        # Calculate busyness
+        busyness = _calculate_busyness(latest.count, agg.baseline, agg.max_count)
+
+        # Calculate vs typical
+        day_of_week = (latest.timestamp.weekday() + 1) % 7
+        minutes = (
+            latest.timestamp.hour * 60
+            + (latest.timestamp.minute // TIME_BUCKET_SIZE) * TIME_BUCKET_SIZE
+        )
+        typical = agg.time_averages.get((day_of_week, minutes))
+
+        vs_typical = None
+        if typical and typical > 0:
+            vs_typical = ((latest.count - typical) / typical) * 100
+
+        # Calculate trend
+        trend: Literal["Increasing", "Steady", "Decreasing"] | None = None
+        if past_count and past_count > 0:
+            change = (latest.count - past_count) / past_count
+            if change > TREND_THRESHOLD:
+                trend = "Increasing"
+            elif change < -TREND_THRESHOLD:
+                trend = "Decreasing"
+            else:
+                trend = "Steady"
+
+        # Build today's data points
+        today_data = [
+            DataPoint(
+                timestamp=c.timestamp,
+                busyness_percentage=_calculate_busyness(
+                    c.count, agg.baseline, agg.max_count
+                ),
+            )
+            for c in location_counts
+            if c.timestamp >= midnight_today
+        ]
+
+        results.append(
+            LocationStatus(
+                location=location,
+                timestamp=latest.timestamp,
+                busyness_percentage=busyness,
+                vs_typical_percentage=vs_typical,
+                trend=trend,
+                today_data=today_data,
+            )
+        )
+
+    return results
+
+
 _cache: tuple[float, list[LocationStatus]] | None = None
 
 
@@ -55,7 +249,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(lifespan=lifespan, root_path="/api")
-
 app.add_middleware(GZipMiddleware)
 
 
@@ -73,164 +266,6 @@ def health() -> str:
     return "Ok"
 
 
-def _calculate_busyness(
-    count: float | None,
-    baseline: float | None,
-    adjusted_max: float | None,
-) -> float | None:
-    if count is None or baseline is None or adjusted_max is None or adjusted_max <= 0:
-        return None
-    busyness = ((count - baseline) / adjusted_max) * 100
-    return max(0.0, min(100.0, busyness))
-
-
-def _build_location_status(
-    db: sqlite3.Connection,
-) -> list[LocationStatus]:
-    now = datetime.now(TIMEZONE)
-    midnight_today = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    yesterday = now - timedelta(days=1)
-
-    rows = db.execute(
-        """
-                WITH
-                -- 1. Limit to recent data, then rank by location (most recent first)
-                recent_counts AS (
-                    SELECT
-                        location,
-                        timestamp,
-                        smoothed_count
-                    FROM
-                        smoothed_counts
-                    WHERE
-                        timestamp >= ?
-                ),
-                ranked_counts AS (
-                    SELECT
-                        location,
-                        timestamp,
-                        smoothed_count,
-                        ROW_NUMBER() OVER (PARTITION BY location ORDER BY timestamp DESC) AS rn
-                    FROM
-                        recent_counts
-                ),
-                -- 2. Isolate the latest data and the specific past data point for trend analysis.
-                latest_trend_data AS (
-                    SELECT
-                        rc1.location,
-                        rc1.timestamp,
-                        rc1.smoothed_count,
-                        rc2.smoothed_count AS past_count
-                    FROM
-                        ranked_counts rc1
-                    LEFT JOIN
-                        ranked_counts rc2 ON rc1.location = rc2.location AND rc2.rn = rc1.rn + ?
-                    WHERE
-                        rc1.rn = 1
-                ),
-                -- 3. Aggregate today's data into a single JSON object per location.
-                today_agg AS (
-                    SELECT
-                        location,
-                        json_group_array(json_object('timestamp', timestamp, 'smoothed_count', smoothed_count)) AS today_json
-                    FROM
-                        recent_counts
-                    WHERE
-                        timestamp >= ?
-                    GROUP BY
-                        location
-                )
-                -- 4. Main query to join everything together.
-                SELECT
-                    ltd.location,
-                    ltd.timestamp,
-                    ltd.smoothed_count,
-                    ltd.past_count,
-                    b.baseline_count,
-                    mc.baseline_adjusted_max_count,
-                    ta.mean_count,
-                    tda.today_json
-                FROM
-                    latest_trend_data ltd
-                LEFT JOIN
-                    baseline b ON ltd.location = b.location
-                LEFT JOIN
-                    max_count mc ON ltd.location = mc.location
-                LEFT JOIN
-                    time_averages ta ON ltd.location = ta.location
-                    AND ta.day_of_week = CAST(strftime('%w', ltd.timestamp) AS INTEGER)
-                    AND ta.time_bucket = (CAST(strftime('%H', ltd.timestamp) AS INTEGER) * 60) + (CAST(strftime('%M', ltd.timestamp) AS INTEGER) / ?) * ?
-                LEFT JOIN
-                    today_agg tda ON ltd.location = tda.location
-                ORDER BY
-                    ltd.location;
-                """,
-        (
-            yesterday.isoformat(sep=" ", timespec="seconds"),
-            TREND_LOOKBACK_ROWS,
-            midnight_today.isoformat(sep=" ", timespec="seconds"),
-            TIME_BUCKET_SIZE,
-            TIME_BUCKET_SIZE,
-        ),
-    ).fetchall()
-
-    if not rows:
-        raise HTTPException(status_code=503, detail="No data available")
-
-    results: list[LocationStatus] = []
-    for row in rows:
-        current_count = row["smoothed_count"]
-        baseline = row["baseline_count"]
-        adjusted_max = row["baseline_adjusted_max_count"]
-        typical_count = row["mean_count"]
-        past_count = row["past_count"]
-
-        busyness_percentage = _calculate_busyness(current_count, baseline, adjusted_max)
-
-        vs_typical_percentage = None
-        if typical_count and typical_count > 0 and current_count is not None:
-            vs_typical_percentage = (
-                (current_count - typical_count) / typical_count
-            ) * 100
-
-        trend = None
-        if past_count and past_count > 0 and current_count is not None:
-            change_ratio = (current_count - past_count) / past_count
-            if change_ratio > TREND_THRESHOLD:
-                trend = "Increasing"
-            elif change_ratio < -TREND_THRESHOLD:
-                trend = "Decreasing"
-            else:
-                trend = "Steady"
-
-        today_data = []
-        if row["today_json"]:
-            today_points = json.loads(row["today_json"])
-            for point in today_points:
-                busyness = _calculate_busyness(
-                    point["smoothed_count"], baseline, adjusted_max
-                )
-                today_data.append(
-                    DataPoint(
-                        timestamp=datetime.fromisoformat(point["timestamp"]),
-                        busyness_percentage=busyness,
-                    )
-                )
-
-        results.append(
-            LocationStatus(
-                location=row["location"],
-                timestamp=datetime.fromisoformat(row["timestamp"]),
-                busyness_percentage=busyness_percentage,
-                vs_typical_percentage=vs_typical_percentage,
-                trend=trend,
-                today_data=sorted(today_data, key=lambda p: p.timestamp),
-            )
-        )
-
-    return results
-
-
 @app.get("/current")
 def get_current(
     db: Annotated[sqlite3.Connection, Depends(get_db)],
@@ -239,16 +274,12 @@ def get_current(
 
     now = time()
 
-    # Return cached data if valid
     if _cache is not None:
         cached_time, cached_data = _cache
         if now - cached_time < CACHE_TTL:
             return cached_data
 
-    # Build fresh data
     results = _build_location_status(db)
-
-    # Update cache
     _cache = (now, results)
 
     return results

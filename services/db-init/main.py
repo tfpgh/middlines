@@ -4,7 +4,7 @@ from loguru import logger
 
 DATABASE_PATH = "/data/middlines.db"
 
-# Number of rows to smooth over in smoothed_counts. 5 rows at 2 min intervals is 10 min average
+# Number of rows to smooth over. 5 rows at 1 min intervals = 5 min rolling average
 SMOOTHING_WINDOW_ROWS = 5
 
 
@@ -51,29 +51,6 @@ def init_db() -> None:
     """)
     conn.commit()
     logger.info("Smoothed counts view created")
-
-    # Create aggregation tables
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS baseline (
-            location TEXT PRIMARY KEY,
-            baseline_count REAL NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS max_count (
-            location TEXT PRIMARY KEY,
-            baseline_adjusted_max_count REAL NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS time_averages (
-            location TEXT NOT NULL,
-            day_of_week INTEGER NOT NULL,
-            time_bucket INTEGER NOT NULL,
-            mean_count REAL NOT NULL,
-            PRIMARY KEY (location, day_of_week, time_bucket)
-        );
-    """)
-    conn.commit()
-    logger.info("Aggregation tables ready")
 
     conn.close()
     logger.info("Database initialization complete")

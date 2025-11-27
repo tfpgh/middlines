@@ -1,6 +1,5 @@
 x-shared-environment: &shared-environment
   TZ: America/New_York
-  TIME_BUCKET_SIZE: 10
 
 services:
   mosquitto:
@@ -26,17 +25,6 @@ services:
     depends_on:
       mosquitto:
         condition: service_started
-      db-init:
-        condition: service_completed_successfully
-    volumes:
-      - ./data:/data
-    environment:
-      <<: *shared-environment
-
-  aggregator:
-    build: ./services/aggregator
-    restart: unless-stopped
-    depends_on:
       db-init:
         condition: service_completed_successfully
     volumes:
