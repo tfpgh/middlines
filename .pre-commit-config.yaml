@@ -10,3 +10,18 @@ repos:
     rev: v1.1.407
     hooks:
       - id: pyright
+
+  - repo: local
+    hooks:
+      - id: frontend-eslint
+        name: Frontend ESLint
+        entry: bash -c 'cd frontend && pnpm eslint --fix'
+        language: system
+        files: ^frontend/.*\.(ts|tsx|js|jsx)$
+        pass_filenames: false
+      - id: frontend-typecheck
+        name: Frontend TypeScript Check
+        entry: bash -c 'cd frontend && pnpm tsc -b'
+        language: system
+        files: ^frontend/.*\.(ts|tsx)$
+        pass_filenames: false
