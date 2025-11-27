@@ -94,7 +94,7 @@ docker exec mosquitto mosquitto_pub -t "middlines/ross/count" -m "42"
 
 **API:**
 - Computes statistics in-memory on each request (cached 30s):
-  - Baselines from 1-3 AM readings
+  - Baselines from 1-4 AM readings
   - Max counts (99th percentile, baseline-adjusted)
   - Time averages by day/time bucket for "vs typical"
 - Returns busyness percentage, trend, and vs-typical comparison

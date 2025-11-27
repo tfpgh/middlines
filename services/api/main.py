@@ -19,7 +19,7 @@ TIMEZONE = ZoneInfo(os.environ.get("TZ", "America/New_York"))
 CACHE_TTL = 30
 
 # Trend: compare current count to N rows back
-TREND_LOOKBACK_ROWS = 5
+TREND_LOOKBACK_ROWS = 10
 # Trend: percentage change threshold to determine increasing/decreasing
 TREND_THRESHOLD = 0.07
 
@@ -28,7 +28,7 @@ TIME_BUCKET_SIZE = 10
 # Aggregation: days of historical data to consider
 LOOKBACK_DAYS = 45
 # Aggregation: percentile for max count calculation (0.99 = 99th percentile)
-MAX_PERCENTILE = 0.99
+MAX_PERCENTILE = 0.997
 # Aggregation: multiplier of baseline below which location is considered closed
 CLOSED_THRESHOLD = 1.5
 

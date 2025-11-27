@@ -4,7 +4,7 @@ export const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       staleTime: 30 * 1000, // 30s (matches API cache)
-      refetchInterval: 45 * 1000, // 45s auto-refresh
+      refetchInterval: 60 * 1000, // 60s auto-refresh
       refetchOnWindowFocus: true,
       retry: 2,
     },
