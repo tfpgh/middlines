@@ -21,41 +21,11 @@ CLOSED_THRESHOLD = 1.5
 TIME_BUCKET_SIZE = 10
 
 
-# Create derived aggregation tables if they don't exist
-def init_aggregation_tables() -> None:
-    conn = sqlite3.connect(DATABASE_PATH)
-
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS baseline (
-            location TEXT PRIMARY KEY,
-            baseline_count REAL NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS max_count (
-            location TEXT PRIMARY KEY,
-            baseline_adjusted_max_count REAL NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS time_averages (
-            location TEXT NOT NULL,
-            day_of_week INTEGER NOT NULL,
-            time_bucket INTEGER NOT NULL,
-            mean_count REAL NOT NULL,
-            PRIMARY KEY (location, day_of_week, time_bucket)
-        );
-        """)
-
-    conn.commit()
-    conn.close()
-
-    logger.info("Aggregation tables initialized")
-
-
 # Compute baselines from last night's 1-4am readings
 def compute_baselines() -> None:
     logger.info("Computing baseline")
 
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = sqlite3.connect(DATABASE_PATH, timeout=5.0)
 
     cutoff_time = datetime.now(TIMEZONE) - timedelta(days=1)
     cutoff_str = cutoff_time.isoformat(sep=" ", timespec="seconds")
@@ -85,7 +55,7 @@ def compute_baselines() -> None:
 def compute_max_counts() -> None:
     logger.info("Computing max counts")
 
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = sqlite3.connect(DATABASE_PATH, timeout=5.0)
 
     lookback_time = datetime.now(TIMEZONE) - timedelta(days=LOOKBACK_LENGTH)
     lookback_str = lookback_time.isoformat(sep=" ", timespec="seconds")
@@ -134,7 +104,7 @@ def compute_max_counts() -> None:
 def compute_time_averages() -> None:
     logger.info("Computing time averages")
 
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = sqlite3.connect(DATABASE_PATH, timeout=5.0)
 
     lookback_time = datetime.now(TIMEZONE) - timedelta(days=LOOKBACK_LENGTH)
     lookback_str = lookback_time.isoformat(sep=" ", timespec="seconds")
@@ -184,8 +154,6 @@ def run_aggregation() -> None:
 
 def main() -> None:
     logger.info("Aggregator service starting")
-
-    init_aggregation_tables()
 
     run_aggregation()
 

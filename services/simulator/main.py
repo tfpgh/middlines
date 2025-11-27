@@ -20,20 +20,6 @@ PUBLISH_INTERVAL_SECONDS = 60
 TEST_LOCATION = "Simulated Test"
 
 
-def _ensure_counts_table(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS counts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            location TEXT NOT NULL,
-            count INTEGER NOT NULL,
-            timestamp TEXT NOT NULL
-        );
-        """
-    )
-    conn.commit()
-
-
 def _is_weekend(current: datetime) -> bool:
     # weekday(): Monday=0, Sunday=6
     return current.weekday() >= 5
@@ -99,8 +85,7 @@ def generate_count(current: datetime) -> int:
 
 
 def seed_historical_data() -> None:
-    conn = sqlite3.connect(DATABASE_PATH)
-    _ensure_counts_table(conn)
+    conn = sqlite3.connect(DATABASE_PATH, timeout=5.0)
 
     # Clear out any previous generated data for the test location
     conn.execute(
@@ -121,7 +106,7 @@ def seed_historical_data() -> None:
         timestamp = current.isoformat(sep=" ", timespec="seconds")
         count = generate_count(current)
         rows.append((TEST_LOCATION, count, timestamp))
-        current += timedelta(minutes=1)
+        current += timedelta(seconds=PUBLISH_INTERVAL_SECONDS)
 
     conn.executemany(
         "INSERT INTO counts (location, count, timestamp) VALUES (?, ?, ?)",

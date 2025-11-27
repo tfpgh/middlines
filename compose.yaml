@@ -10,31 +10,48 @@ services:
       - ./mosquitto/config:/mosquitto/config:ro
     environment:
       <<: *shared-environment
+
+  db-init:
+    build: ./services/db-init
+    volumes:
+      - ./data:/data
+    environment:
+      <<: *shared-environment
+
   ingester:
     build: ./services/ingester
     depends_on:
-      - mosquitto
+      mosquitto:
+        condition: service_started
+      db-init:
+        condition: service_completed_successfully
     volumes:
       - ./data:/data
     environment:
       <<: *shared-environment
+
   aggregator:
     build: ./services/aggregator
     depends_on:
-      - ingester
+      db-init:
+        condition: service_completed_successfully
     volumes:
       - ./data:/data
     environment:
       <<: *shared-environment
+
   simulator:
     build: ./services/simulator
     depends_on:
-      - mosquitto
-      - ingester
+      mosquitto:
+        condition: service_started
+      db-init:
+        condition: service_completed_successfully
     volumes:
       - ./data:/data
     environment:
       <<: *shared-environment
+
   api:
     build: ./services/api
     ports:
@@ -43,6 +60,7 @@ services:
       - ./data:/data
     environment:
       <<: *shared-environment
+
   frontend:
     build: ./frontend
     ports:

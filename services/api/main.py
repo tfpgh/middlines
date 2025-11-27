@@ -38,7 +38,7 @@ app.add_middleware(GZipMiddleware)
 
 
 def get_db() -> Generator[sqlite3.Connection]:
-    db = sqlite3.connect(DATABASE_PATH)
+    db = sqlite3.connect(DATABASE_PATH, timeout=5.0)
     db.row_factory = sqlite3.Row
     try:
         yield db
