@@ -26,6 +26,15 @@ services:
       - ./data:/data
     environment:
       <<: *shared-environment
+  simulator:
+    build: ./services/simulator
+    depends_on:
+      - mosquitto
+      - ingester
+    volumes:
+      - ./data:/data
+    environment:
+      <<: *shared-environment
   api:
     build: ./services/api
     ports:
