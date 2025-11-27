@@ -1,18 +1,18 @@
-import { useGetCurrentCurrentGet } from '@/api/generated/default/default'
-import { DiningHallCard } from '@/components/dining-hall-card'
-import { ThemeToggle } from '@/components/theme-toggle'
-import { InfoDialog } from '@/components/info-dialog'
-import { Loader2 } from 'lucide-react'
+import { useGetCurrentCurrentGet } from "@/api/generated/default/default";
+import { DiningHallCard } from "@/components/dining-hall-card";
+import { ThemeToggle } from "@/components/theme-toggle";
+import { InfoDialog } from "@/components/info-dialog";
+import { Loader2 } from "lucide-react";
 
 export function DiningHallDashboard() {
-  const { data, isLoading, error } = useGetCurrentCurrentGet()
+  const { data, isLoading, error } = useGetCurrentCurrentGet();
 
   if (isLoading) {
     return (
       <div className="flex min-h-screen items-center justify-center">
         <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
       </div>
-    )
+    );
   }
 
   if (error) {
@@ -27,7 +27,7 @@ export function DiningHallDashboard() {
           </p>
         </div>
       </div>
-    )
+    );
   }
 
   return (
@@ -50,5 +50,5 @@ export function DiningHallDashboard() {
         </div>
       </main>
     </div>
-  )
+  );
 }

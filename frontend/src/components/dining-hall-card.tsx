@@ -30,71 +30,76 @@ export function DiningHallCard({ location }: DiningHallCardProps) {
 
   return (
     <Card
-      className={`${borderClasses} gap-5 transition-all ${isInteractive ? 'cursor-pointer hover:shadow-lg' : ''}`}
+      className={`${borderClasses} transition-all duration-300 ease-in-out ${isInteractive ? 'cursor-pointer hover:shadow-lg' : ''}`}
       onClick={() => isInteractive && setIsExpanded(!isExpanded)}
     >
       <CardHeader>
         <div className="flex items-center justify-between">
           <CardTitle className="text-xl">{name}</CardTitle>
-          {isExpanded ? (
-            <ChevronUp className="h-5 w-5 text-muted-foreground" />
-          ) : (
-            <ChevronDown className="h-5 w-5 text-muted-foreground" />
+          {isInteractive && (
+            isExpanded ? (
+              <ChevronUp className="h-5 w-5 text-muted-foreground transition-transform" />
+            ) : (
+              <ChevronDown className="h-5 w-5 text-muted-foreground transition-transform" />
+            )
           )}
         </div>
       </CardHeader>
 
       <CardContent>
-        <div className="text-center mb-3">
-          {isClosed ? (
-            <div className="text-4xl font-bold text-muted-foreground">
-              Closed
-            </div>
-          ) : (
-            <div className="text-6xl font-bold tabular-nums">
-              {Math.round(busyness_percentage!)}%
+        <div className="space-y-3">
+          {/* Busyness percentage display */}
+          <div className="text-center">
+            {isClosed ? (
+              <div className="text-4xl font-bold text-muted-foreground">
+                Closed
+              </div>
+            ) : (
+              <div className="text-6xl font-bold tabular-nums">
+                {Math.round(busyness_percentage!)}%
+              </div>
+            )}
+          </div>
+
+          {/* Vs Typical & Trend Row */}
+          {!isClosed && (
+            <div className="flex items-center justify-between text-sm">
+              {/* Vs Typical Badge */}
+              <div>
+                {vs_typical_percentage !== null && (
+                  <span
+                    className={`inline-flex items-center px-2.5 py-0.5 rounded-full font-medium ${
+                      vs_typical_percentage > 0
+                        ? "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200"
+                        : vs_typical_percentage < 0
+                          ? "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
+                          : "bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200"
+                    }`}
+                  >
+                    {vs_typical_percentage > 0 ? "+" : ""}
+                    {Math.round(vs_typical_percentage)}% vs typical
+                  </span>
+                )}
+              </div>
+
+              {/* Trend Indicator */}
+              <div className="flex items-center gap-1 text-muted-foreground">
+                <span className="text-lg" aria-label={trendLabel}>
+                  {trendEmoji}
+                </span>
+                <span className="text-xs uppercase tracking-wider">
+                  {trendLabel}
+                </span>
+              </div>
             </div>
           )}
         </div>
 
-        {/* Vs Typical & Trend Row */}
-        {!isClosed && (
-          <div className="flex items-center justify-between text-sm">
-            {/* Vs Typical Badge */}
-            <div>
-              {vs_typical_percentage !== null && (
-                <span
-                  className={`inline-flex items-center px-2.5 py-0.5 rounded-full font-medium ${
-                    vs_typical_percentage > 0
-                      ? "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200"
-                      : vs_typical_percentage < 0
-                        ? "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
-                        : "bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200"
-                  }`}
-                >
-                  {vs_typical_percentage > 0 ? "+" : ""}
-                  {Math.round(vs_typical_percentage)}% vs typical
-                </span>
-              )}
-            </div>
-
-            {/* Trend Indicator */}
-            <div className="flex items-center gap-1 text-muted-foreground">
-              <span className="text-lg" aria-label={trendLabel}>
-                {trendEmoji}
-              </span>
-              <span className="text-xs uppercase tracking-wider">
-                {trendLabel}
-              </span>
-            </div>
-          </div>
-        )}
-
         {/* Expanded Chart */}
         {isExpanded && hasHistoricalData && (
-          <div className="pt-4 border-t overflow-hidden">
+          <div className="-mx-2 pt-5 mt-4 border-t overflow-hidden">
             {isClosed && (
-              <p className="text-sm text-muted-foreground mb-2">Today's Activity</p>
+              <p className="text-sm text-muted-foreground mb-3 px-2">Today's Activity</p>
             )}
             <BusynessChart data={today_data} />
           </div>
@@ -102,7 +107,7 @@ export function DiningHallCard({ location }: DiningHallCardProps) {
 
         {/* Empty state when expanded but no data */}
         {isExpanded && !hasHistoricalData && (
-          <div className="pt-4 pb-2 border-t text-center text-sm text-muted-foreground">
+          <div className="pt-5 mt-4 pb-2 border-t text-center text-sm text-muted-foreground">
             No activity data available yet
           </div>
         )}

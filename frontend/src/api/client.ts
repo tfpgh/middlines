@@ -5,7 +5,7 @@ export type BodyType<BodyData> = BodyData;
 export const customInstance = <T>(
   config: {
     url: string;
-    method: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH';
+    method: "GET" | "POST" | "PUT" | "DELETE" | "PATCH";
     params?: Record<string, unknown>;
     data?: BodyType<unknown>;
     headers?: HeadersInit;
@@ -17,19 +17,22 @@ export const customInstance = <T>(
 
   // Build query string from params
   const queryString = params
-    ? '?' +
+    ? "?" +
       Object.entries(params)
         .filter(([, value]) => value !== undefined && value !== null)
-        .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`)
-        .join('&')
-    : '';
+        .map(
+          ([key, value]) =>
+            `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`,
+        )
+        .join("&")
+    : "";
 
   const fullUrl = `/api${url}${queryString}`;
 
   return fetch(fullUrl, {
     method,
     headers: {
-      'Content-Type': 'application/json',
+      "Content-Type": "application/json",
       ...headers,
     },
     body: data ? JSON.stringify(data) : undefined,

@@ -1,6 +1,6 @@
 import type { DataPoint } from '@/api/generated/models'
-import { ChartContainer, ChartTooltip, ChartTooltipContent } from '@/components/ui/chart'
-import { LineChart, Line, CartesianGrid, ResponsiveContainer } from 'recharts'
+import { ChartContainer, ChartTooltip } from '@/components/ui/chart'
+import { LineChart, Line, XAxis, ResponsiveContainer } from 'recharts'
 import { filterNonClosedData, formatTimeForChart } from '@/lib/data-filters'
 import { useTheme } from '@/components/theme-provider'
 
@@ -32,7 +32,7 @@ export function BusynessChart({ data }: BusynessChartProps) {
   }))
 
   return (
-    <div className="h-32 sm:h-40 w-full max-w-full min-w-0">
+    <div className="h-36 sm:h-44 w-full">
       <ChartContainer
         config={{
           busyness: {
@@ -44,10 +44,35 @@ export function BusynessChart({ data }: BusynessChartProps) {
         <ResponsiveContainer width="100%" height="100%">
           <LineChart
             data={chartData}
-            margin={{ top: 0, right: 0, bottom: 0, left: 0 }}
+            margin={{ top: 5, right: 5, bottom: 20, left: 5 }}
           >
-            <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
-            <ChartTooltip content={<ChartTooltipContent />} />
+            <XAxis
+              dataKey="time"
+              tick={{ fontSize: 11, fill: 'currentColor' }}
+              tickLine={false}
+              axisLine={false}
+              interval="preserveStartEnd"
+              className="text-muted-foreground"
+              height={20}
+            />
+            <ChartTooltip
+              content={({ active, payload }) => {
+                if (!active || !payload?.length) return null
+                const data = payload[0]
+                const percentage = Math.round(data.value as number)
+                const time = data.payload.time
+                return (
+                  <div className="bg-background border border-border/50 rounded-lg px-3 py-2 shadow-xl">
+                    <div className="text-sm font-semibold">
+                      {percentage}%
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      {time}
+                    </div>
+                  </div>
+                )
+              }}
+            />
             <Line
               type="monotone"
               dataKey="busyness"
@@ -55,7 +80,7 @@ export function BusynessChart({ data }: BusynessChartProps) {
               strokeWidth={3}
               dot={false}
               activeDot={{ r: 5 }}
-              animationDuration={300}
+              animationDuration={250}
               isAnimationActive={true}
             />
           </LineChart>
