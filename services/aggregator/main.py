@@ -155,14 +155,23 @@ def run_aggregation() -> None:
 def main() -> None:
     logger.info("Aggregator service starting")
 
+    logger.info("Running first initial aggregation")
     run_aggregation()
 
-    schedule.every().day.at("04:15").do(run_aggregation)
-    logger.info("Scheduled aggregation to run daily at 4:15 AM")
+    logger.info("Sleeping for 10 seconds")
+    sleep(10)
+
+    logger.info(
+        "Running second initial aggregation to aggregate potentially missing test data"
+    )
+    run_aggregation()
+
+    schedule.every(1).minutes.do(run_aggregation)
+    logger.info("Scheduled aggregation to run every minute")
 
     while True:
         schedule.run_pending()
-        sleep(60)
+        sleep(1)
 
 
 if __name__ == "__main__":
