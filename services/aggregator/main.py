@@ -133,7 +133,7 @@ def compute_time_averages() -> None:
     conn.close()
 
     logger.info(
-        f"Time averages calculated for calculated for {bucket_count} location/day/time buckets"
+        f"Time averages calculated for {bucket_count} location/day/time buckets"
     )
 
 

@@ -4,6 +4,7 @@ x-shared-environment: &shared-environment
 services:
   mosquitto:
     image: eclipse-mosquitto:2
+    restart: unless-stopped
     ports:
       - 1883:1883
     volumes:
@@ -20,6 +21,7 @@ services:
 
   ingester:
     build: ./services/ingester
+    restart: unless-stopped
     depends_on:
       mosquitto:
         condition: service_started
@@ -32,6 +34,7 @@ services:
 
   aggregator:
     build: ./services/aggregator
+    restart: unless-stopped
     depends_on:
       db-init:
         condition: service_completed_successfully
@@ -42,6 +45,7 @@ services:
 
   simulator:
     build: ./services/simulator
+    restart: unless-stopped
     depends_on:
       mosquitto:
         condition: service_started
@@ -54,8 +58,12 @@ services:
 
   api:
     build: ./services/api
+    restart: unless-stopped
     ports:
       - 8000:8000
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
     volumes:
       - ./data:/data
     environment:
@@ -63,6 +71,7 @@ services:
 
   frontend:
     build: ./frontend
+    restart: unless-stopped
     ports:
       - "80:80"
     depends_on:

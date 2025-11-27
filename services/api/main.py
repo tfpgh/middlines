@@ -28,6 +28,21 @@ TIME_BUCKET_SIZE = 10
 # Seconds
 CACHE_TTL = 30
 
+
+class DataPoint(BaseModel):
+    timestamp: datetime
+    busyness_percentage: float | None
+
+
+class LocationStatus(BaseModel):
+    location: str
+    timestamp: datetime
+    busyness_percentage: float | None
+    vs_typical_percentage: float | None
+    trend: Literal["Increasing", "Steady", "Decreasing"] | None
+    today_data: list[DataPoint]
+
+
 # Simple cache: (timestamp, data) or None
 _cache: tuple[float, list[LocationStatus]] | None = None
 
@@ -56,20 +71,6 @@ def get_db() -> Generator[sqlite3.Connection]:
 @app.get("/health")
 def health() -> str:
     return "Ok"
-
-
-class DataPoint(BaseModel):
-    timestamp: datetime
-    busyness_percentage: float | None
-
-
-class LocationStatus(BaseModel):
-    location: str
-    timestamp: datetime
-    busyness_percentage: float | None
-    vs_typical_percentage: float | None
-    trend: Literal["Increasing", "Steady", "Decreasing"] | None
-    today_data: list[DataPoint]
 
 
 def _calculate_busyness(
