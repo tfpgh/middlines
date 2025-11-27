@@ -1,7 +1,7 @@
 #include <Arduino.h>
 #include <libpax_api.h>
 #include <WiFi.h>
-#include <WiFiClientSecure.h>
+#include <WiFiClient.h>
 #include <PubSubClient.h>
 #include "secrets.h"
 #include "config.h"
@@ -9,7 +9,7 @@
 
 count_payload_t ble_device_count;
 
-WiFiClientSecure netClient;
+WiFiClient netClient;
 PubSubClient mqttClient(netClient);
 
 // Called by LibPax when BLE counts update, publishes count to MQTT server
@@ -54,10 +54,11 @@ void connectWiFi() {
 }
 
 void connectMQTT() {
-    netClient.setCACert(AWS_ROOT_CA);
-    netClient.setCertificate(AWS_CERTIFICATE);
-    netClient.setPrivateKey(AWS_PRIVATE_KEY);
-    mqttClient.setServer(AWS_ENDPOINT, 8883);
+    // netClient.setCACert(AWS_ROOT_CA);
+    // netClient.setCertificate(AWS_CERTIFICATE);
+    // netClient.setPrivateKey(AWS_PRIVATE_KEY);
+    
+    mqttClient.setServer(MQTT_HOST, MQTT_PORT);
 
     while (!mqttClient.connected()) {
         if (mqttClient.connect(CLIENT_ID)) break;
