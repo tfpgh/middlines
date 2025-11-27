@@ -59,7 +59,7 @@ Real-time dining hall line tracking for Middlebury College.
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then:
 ```bash
 uv sync --all-packages
-pre-commit install
+uv run pre-commit install
 ```
 
 ## Running Locally
