@@ -4,56 +4,54 @@ Real-time dining hall line tracking for Middlebury College.
 
 ## Architecture
 ```
-┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐
-│  ESP32 Node     │      │  ESP32 Node     │      │  ESP32 Node     │
-│  (Ross)         │      │  (Atwater)      │      │  (Proctor)      │
-└────────┬────────┘      └────────┬────────┘      └────────┬────────┘
-         │                        │                        │
-         │        MQTT: middlines/{location}/count         │
-         └────────────────────────┼────────────────────────┘
-                                  ▼
-                       ┌─────────────────────┐
-                       │  Mosquitto (MQTT)   │
-                       │  :1883              │
-                       └──────────┬──────────┘
-                                  │ subscribe
-                                  ▼
-                       ┌─────────────────────┐
-                       │  Ingester (Python)  │
-                       │  - Smoothing view   │
-                       └──────────┬──────────┘
-                                  │ write
-                                  ▼
-                       ┌──────────────────────────────────┐
-                       │  SQLite (/data/middlines.db)     │
-                       │  ┌────────────┐  ┌─────────────┐ │
-                       │  │ Raw Counts │  │ Aggregator  │ │
-                       │  │ (smoothed) │  │   Tables    │ │
-                       │  └────────────┘  │ - baselines │ │
-                       │                  │ - max_count │ │
-                       │                  │ - averages  │ │
-                       │                  └─────────────┘ │
-                       └───┬──────────────────────────┬───┘
-                           │ read/write               │ read
-                  ┌────────┘                          └────────┐
-                  ▼                                            ▼
-       ┌─────────────────────┐                      ┌─────────────────────┐
-       │  Aggregator         │                      │  FastAPI            │
-       │  (daily 4:15 AM)    │                      │  :8000              │
-       │  - Compute baselines│                      └──────────┬──────────┘
-       │  - Compute max count│                                 │ /api/*
-       │  - Time averages    │                                 ▼
-       └─────────────────────┘                      ┌─────────────────────┐
-                                                    │  Nginx              │
-                                                    │  :80                │
-                                                    │  - /api/* → api     │
-                                                    │  - /* → static      │
-                                                    └──────────┬──────────┘
-                                                               │
-                                                               ▼
-                                                    ┌─────────────────────┐
-                                                    │ Vite React Frontend │
-                                                    └─────────────────────┘
+┌────────────┐ ┌────────────┐ ┌────────────┐ ┌────────────┐
+│   ESP32    │ │   ESP32    │ │   ESP32    │ │ Simulator  │
+│   (Ross)   │ │ (Atwater)  │ │ (Proctor)  │ │            │
+└─────┬──────┘ └─────┬──────┘ └─────┬──────┘ └─────┬──────┘
+      │              │              │              │
+      │       MQTT: middlines/{location}/count     │
+      └──────────────────────┬─────────────────────┘
+                             ▼
+                  ┌────────────────────┐
+                  │  Mosquitto (MQTT)  │
+                  │       :1883        │
+                  └─────────┬──────────┘
+                            │ subscribe
+                            ▼
+                  ┌────────────────────┐
+                  │ Ingester (Python)  │
+                  └─────────┬──────────┘
+                            │ write
+                            ▼
+                  ┌────────────────────────────────┐
+                  │  SQLite (/data/middlines.db)   │
+                  │  ┌──────────┐  ┌────────────┐  │
+                  │  │  Counts  │  │ Aggregator │  │
+                  │  │  Table   │  │   Tables   │  │
+                  │  └──────────┘  └────────────┘  │
+                  │  ┌──────────┐                  │
+                  │  │ Smoothed │                  │
+                  │  │   View   │                  │
+                  │  └──────────┘                  │
+                  └───────┬───────────────┬────────┘
+                          │ read/write    │ read
+                 ┌────────┘               └────────┐
+                 ▼                                 ▼
+      ┌────────────────────┐            ┌────────────────────┐
+      │    Aggregator      │            │      FastAPI       │
+      │  (every minute)    │            │       :8000        │
+      └────────────────────┘            └─────────┬──────────┘
+                                                  │ /api/*
+                                                  ▼
+                                        ┌────────────────────┐
+                                        │       Nginx        │
+                                        │        :80         │
+                                        └─────────┬──────────┘
+                                                  │
+                                                  ▼
+                                        ┌────────────────────┐
+                                        │   React Frontend   │
+                                        └────────────────────┘
 ```
 
 ## Development Setup
@@ -83,28 +81,46 @@ docker exec mosquitto mosquitto_sub -t "middlines/#" -v
 docker exec mosquitto mosquitto_pub -t "middlines/ross/count" -m "42"
 ```
 
-## Data Processing
+## Services
+
+**db-init Service:**
+- Initializes the SQLite database schema on startup
+- Creates the `counts` table with location/timestamp index
+- Creates the `smoothed_counts` view with a 5-row rolling average
+- Creates aggregation tables (`baseline`, `max_count`, `time_averages`)
+- Enables WAL mode for concurrent read/write performance
 
 **Ingester Service:**
-- Subscribes to MQTT topics and writes raw counts to SQLite
-- Creates a `smoothed_counts` view with rolling average to reduce noise
-- Seeds database with realistic test data (full month of November 2025 with meal-time patterns)
+- Subscribes to MQTT topics (`middlines/+/count`)
+- Writes raw counts to SQLite with timestamps
+
+**Simulator Service:**
+- Seeds 30 days of historical test data on startup
+- Generates realistic meal-time traffic patterns (weekday vs weekend)
+- Publishes simulated counts every 60 seconds via MQTT
 
 **Aggregator Service:**
-- Runs daily at 4:15 AM to compute derived statistics:
+- Runs every minute to compute derived statistics:
   - **Baselines**: Nighttime (1-3 AM) averages to detect when halls are closed
   - **Max Counts**: 99th percentile counts for each location (baseline-adjusted)
   - **Time Averages**: Average counts by location/day/time bucket for "vs typical" comparisons
 - Uses 45-day lookback window for calculations
 - Stores results in dedicated tables (`baseline`, `max_count`, `time_averages`)
 
+**API Service:**
+- FastAPI backend serving location status data
+- Calculates busyness percentage, vs-typical comparison, and trend direction
+- Includes 30-second response caching and gzip compression
+
 ## Project Structure
 ```
 middlines/
 ├── services/
-│   ├── ingester/    # MQTT → SQLite with data smoothing
-│   ├── aggregator/  # Daily statistical aggregation
-│   └── api/         # FastAPI data serving backend
+│   ├── db-init/     # Database schema initialization
+│   ├── ingester/    # MQTT → SQLite
+│   ├── simulator/   # Test data generation
+│   ├── aggregator/  # Statistical aggregation (every minute)
+│   └── api/         # FastAPI backend
 ├── frontend/        # Nginx + React + Vite
 ├── mosquitto/       # MQTT broker config
 └── data/            # SQLite database (gitignored)
