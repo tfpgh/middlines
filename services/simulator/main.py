@@ -19,6 +19,7 @@ PUBLISH_INTERVAL_SECONDS = 60
 
 TEST_LOCATION = "Simulated Test"
 
+
 def _is_weekend(current: datetime) -> bool:
     # weekday(): Monday=0, Sunday=6
     return current.weekday() >= 5
