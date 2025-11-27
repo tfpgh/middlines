@@ -25,13 +25,15 @@ export function DiningHallCard({ location }: DiningHallCardProps) {
   const trendEmoji = getTrendEmoji(trend);
   const trendLabel = getTrendLabel(trend);
   const isClosed = busyness_percentage === null;
+  const hasHistoricalData = today_data.some(d => d.busyness_percentage !== null);
+  const isInteractive = !isClosed || hasHistoricalData;
 
   return (
     <Card
-      className={`${borderClasses} transition-all hover:shadow-lg cursor-pointer`}
-      onClick={() => setIsExpanded(!isExpanded)}
+      className={`${borderClasses} gap-5 transition-all ${isInteractive ? 'cursor-pointer hover:shadow-lg' : ''}`}
+      onClick={() => isInteractive && setIsExpanded(!isExpanded)}
     >
-      <CardHeader className="pb-3">
+      <CardHeader>
         <div className="flex items-center justify-between">
           <CardTitle className="text-xl">{name}</CardTitle>
           {isExpanded ? (
@@ -42,8 +44,8 @@ export function DiningHallCard({ location }: DiningHallCardProps) {
         </div>
       </CardHeader>
 
-      <CardContent className="space-y-4">
-        <div className="text-center">
+      <CardContent>
+        <div className="text-center mb-3">
           {isClosed ? (
             <div className="text-4xl font-bold text-muted-foreground">
               Closed
@@ -89,9 +91,19 @@ export function DiningHallCard({ location }: DiningHallCardProps) {
         )}
 
         {/* Expanded Chart */}
-        {isExpanded && !isClosed && (
+        {isExpanded && hasHistoricalData && (
           <div className="pt-4 border-t">
+            {isClosed && (
+              <p className="text-sm text-muted-foreground mb-2">Today's Activity</p>
+            )}
             <BusynessChart data={today_data} />
+          </div>
+        )}
+
+        {/* Empty state when expanded but no data */}
+        {isExpanded && !hasHistoricalData && (
+          <div className="pt-4 pb-2 border-t text-center text-sm text-muted-foreground">
+            No activity data available yet
           </div>
         )}
       </CardContent>
