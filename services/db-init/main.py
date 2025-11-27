@@ -28,6 +28,13 @@ def init_db() -> None:
     conn.commit()
     logger.info("Counts table ready")
 
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_counts_location_timestamp
+        ON counts(location, timestamp);
+    """)
+    conn.commit()
+    logger.info("Counts index ready")
+
     # Create (or recreate) the smoothed view
     conn.execute("DROP VIEW IF EXISTS smoothed_counts")
     conn.execute(f"""

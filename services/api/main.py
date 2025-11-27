@@ -1,8 +1,10 @@
+import json
 import os
 import sqlite3
 from collections.abc import AsyncIterator, Generator
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
+from time import time
 from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
@@ -15,7 +17,6 @@ DATABASE_PATH = "/data/middlines.db"
 
 TIMEZONE = ZoneInfo(os.environ.get("TZ", "America/New_York"))
 
-
 # Trend calculation - compare current to N rows back
 TREND_LOOKBACK_ROWS = 5
 
@@ -23,6 +24,12 @@ TREND_LOOKBACK_ROWS = 5
 TREND_THRESHOLD = 0.07
 
 TIME_BUCKET_SIZE = 10
+
+# Seconds
+CACHE_TTL = 30
+
+# Simple cache: (timestamp, data) or None
+_cache: tuple[float, list[LocationStatus]] | None = None
 
 
 @asynccontextmanager
@@ -76,17 +83,27 @@ def _calculate_busyness(
     return max(0.0, min(100.0, busyness))
 
 
-@app.get("/current")
-def get_current(
-    db: Annotated[sqlite3.Connection, Depends(get_db)],
+def _build_location_status(
+    db: sqlite3.Connection,
 ) -> list[LocationStatus]:
     now = datetime.now(TIMEZONE)
     midnight_today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    yesterday = now - timedelta(days=1)
 
     rows = db.execute(
         """
                 WITH
-                -- 1. Rank all counts for each location, most recent first.
+                -- 1. Limit to recent data, then rank by location (most recent first)
+                recent_counts AS (
+                    SELECT
+                        location,
+                        timestamp,
+                        smoothed_count
+                    FROM
+                        smoothed_counts
+                    WHERE
+                        timestamp >= ?
+                ),
                 ranked_counts AS (
                     SELECT
                         location,
@@ -94,7 +111,7 @@ def get_current(
                         smoothed_count,
                         ROW_NUMBER() OVER (PARTITION BY location ORDER BY timestamp DESC) AS rn
                     FROM
-                        smoothed_counts
+                        recent_counts
                 ),
                 -- 2. Isolate the latest data and the specific past data point for trend analysis.
                 latest_trend_data AS (
@@ -116,7 +133,7 @@ def get_current(
                         location,
                         json_group_array(json_object('timestamp', timestamp, 'smoothed_count', smoothed_count)) AS today_json
                     FROM
-                        smoothed_counts
+                        recent_counts
                     WHERE
                         timestamp >= ?
                     GROUP BY
@@ -148,6 +165,7 @@ def get_current(
                     ltd.location;
                 """,
         (
+            yesterday.isoformat(sep=" ", timespec="seconds"),
             TREND_LOOKBACK_ROWS,
             midnight_today.isoformat(sep=" ", timespec="seconds"),
             TIME_BUCKET_SIZE,
@@ -186,8 +204,6 @@ def get_current(
 
         today_data = []
         if row["today_json"]:
-            import json
-
             today_points = json.loads(row["today_json"])
             for point in today_points:
                 busyness = _calculate_busyness(
@@ -210,5 +226,28 @@ def get_current(
                 today_data=sorted(today_data, key=lambda p: p.timestamp),
             )
         )
+
+    return results
+
+
+@app.get("/current")
+def get_current(
+    db: Annotated[sqlite3.Connection, Depends(get_db)],
+) -> list[LocationStatus]:
+    global _cache
+
+    now = time()
+
+    # Return cached data if valid
+    if _cache is not None:
+        cached_time, cached_data = _cache
+        if now - cached_time < CACHE_TTL:
+            return cached_data
+
+    # Build fresh data
+    results = _build_location_status(db)
+
+    # Update cache
+    _cache = (now, results)
 
     return results
