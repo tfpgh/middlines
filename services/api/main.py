@@ -19,7 +19,7 @@ TIMEZONE = ZoneInfo(os.environ.get("TZ", "America/New_York"))
 CACHE_TTL = 30
 
 # Trend: compare current count to N rows back
-TREND_LOOKBACK_ROWS = 10
+TREND_LOOKBACK_ROWS = 20
 # Trend: percentage change threshold to determine increasing/decreasing
 TREND_THRESHOLD = 0.07
 

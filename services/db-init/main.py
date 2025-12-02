@@ -4,8 +4,8 @@ from loguru import logger
 
 DATABASE_PATH = "/data/middlines.db"
 
-# Number of rows to smooth over. 10 rows at 1 min intervals = 10 min rolling average
-SMOOTHING_WINDOW_ROWS = 10
+# Number of rows to smooth over. 20 rows at 30 second intervals = 10 min rolling average
+SMOOTHING_WINDOW_ROWS = 20
 
 
 def init_db() -> None:

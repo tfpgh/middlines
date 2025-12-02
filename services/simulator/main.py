@@ -15,7 +15,7 @@ TIMEZONE = ZoneInfo(os.environ.get("TZ", "America/New_York"))
 MQTT_HOST = "mosquitto"
 MQTT_PORT = 1883
 DATABASE_PATH = "/data/middlines.db"
-PUBLISH_INTERVAL_SECONDS = 60
+PUBLISH_INTERVAL_SECONDS = 30
 
 TEST_LOCATION = "Simulated Test"
 
