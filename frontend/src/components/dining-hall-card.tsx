@@ -69,9 +69,9 @@ export function DiningHallCard({ location }: DiningHallCardProps) {
                 {vs_typical_percentage !== null && (
                   <span
                     className={`inline-flex items-center px-2.5 py-0.5 rounded-full font-medium ${
-                      vs_typical_percentage > 0
+                      vs_typical_percentage >= 5
                         ? "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200"
-                        : vs_typical_percentage < 0
+                        : vs_typical_percentage <= -5
                           ? "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
                           : "bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200"
                     }`}

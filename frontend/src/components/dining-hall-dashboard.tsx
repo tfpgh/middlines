@@ -43,7 +43,7 @@ export function DiningHallDashboard() {
       </header>
 
       <main className="container mx-auto px-4 py-6">
-        <div className="grid gap-4 grid-cols-1 md:grid-cols-2 lg:grid-cols-3">
+        <div className="grid gap-4 grid-cols-1 md:grid-cols-2 lg:grid-cols-3 items-start">
           {data?.map((location) => (
             <DiningHallCard key={location.location} location={location} />
           ))}
