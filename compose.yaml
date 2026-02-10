@@ -32,18 +32,18 @@ services:
     environment:
       <<: *shared-environment
 
-  simulator:
-    build: ./services/simulator
-    restart: unless-stopped
-    depends_on:
-      mosquitto:
-        condition: service_started
-      db-init:
-        condition: service_completed_successfully
-    volumes:
-      - ./data:/data
-    environment:
-      <<: *shared-environment
+  # simulator:
+  #   build: ./services/simulator
+  #   restart: unless-stopped
+  #   depends_on:
+  #     mosquitto:
+  #       condition: service_started
+  #     db-init:
+  #       condition: service_completed_successfully
+  #   volumes:
+  #     - ./data:/data
+  #   environment:
+  #     <<: *shared-environment
 
   api:
     build: ./services/api
