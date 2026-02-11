@@ -7,7 +7,7 @@ extern const char WIFI_SSID[];
 extern const char WIFI_PASS[];
 
 // -----------------------------
-//          AWS IoT 
+//          AWS IoT
 // -----------------------------
 extern const char AWS_ENDPOINT[];
 extern const char AWS_ROOT_CA[];
