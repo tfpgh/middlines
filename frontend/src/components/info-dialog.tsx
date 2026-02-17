@@ -23,36 +23,47 @@ export function InfoDialog() {
         <DialogHeader>
           <DialogTitle>About MiddLines</DialogTitle>
           <DialogDescription>
-            Real-time dining hall line tracking for Middlebury College.
+            Real-time dining hall busyness tracking for Middlebury College
+            created by{" "}
+            <a
+              href="mailto:tpenner@middlebury.edu"
+              className="underline hover:text-foreground"
+            >
+              Toby Penner
+            </a>
+            {" and "}
+            <a
+              href="mailto:cbitter@middlebury.edu"
+              className="underline hover:text-foreground"
+            >
+              Cam Bitter
+            </a>
+            .
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-4 text-sm">
           <div>
             <h3 className="font-semibold mb-1">How it works</h3>
             <p className="text-muted-foreground">
-              ESP32 sensors count people entering and exiting each dining hall.
-              Data updates automatically every 45 seconds.
+              We have sensors in each dining hall that monitor the relative
+              amount of Bluetooth traffic from students&apos; phones, laptops,
+              AirPods, and other devices to estimate how busy things are. We
+              don't track any information about these devices, just their
+              presence.
             </p>
           </div>
           <div>
-            <h3 className="font-semibold mb-1">Border colors</h3>
-            <ul className="text-muted-foreground space-y-1">
-              <li>🟢 Green shades: Low busyness (0-60%)</li>
-              <li>🟡 Yellow/Lime: Medium busyness (60-80%)</li>
-              <li>🟠 Orange/Red: High busyness (80-100%)</li>
-            </ul>
-          </div>
-          <div>
-            <h3 className="font-semibold mb-1">Trends</h3>
+            <h3 className="font-semibold mb-1">Feedback/Suggestions</h3>
             <p className="text-muted-foreground">
-              ↗ Increasing • → Steady • ↘ Decreasing
-            </p>
-          </div>
-          <div>
-            <h3 className="font-semibold mb-1">vs Typical</h3>
-            <p className="text-muted-foreground">
-              Compares current busyness to historical averages for this time and
-              day.
+              We'd love to hear your feedback and suggestions! Feel free to
+              email us or fill out{" "}
+              <a
+                href="https://forms.gle/hPbVUWJaQMqpWdqE8"
+                className="underline hover:text-foreground"
+              >
+                this form
+              </a>
+              .
             </p>
           </div>
         </div>
