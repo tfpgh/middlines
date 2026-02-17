@@ -24,13 +24,16 @@ TREND_LOOKBACK_ROWS = 20
 TREND_THRESHOLD = 0.07
 
 # Aggregation: time bucket size in minutes
-TIME_BUCKET_SIZE = 10
+TIME_BUCKET_SIZE = 2
 # Aggregation: days of historical data to consider
 LOOKBACK_DAYS = 45
 # Aggregation: percentile for max count calculation (0.99 = 99th percentile)
-MAX_PERCENTILE = 0.997
+MAX_PERCENTILE = 0.9995
 # Aggregation: multiplier of baseline below which location is considered closed
 CLOSED_THRESHOLD = 1.5
+
+# Trend: minimum busyness percentage to report a trend (below this, trend is None)
+TREND_MIN_BUSYNESS = 10.0
 
 
 # Response Models
@@ -58,7 +61,7 @@ class SmoothedCount(BaseModel):
 class LocationAggregates(BaseModel):
     baseline: float
     max_count: float  # baseline-adjusted
-    time_averages: dict[tuple[int, int], float]  # (day_of_week, time_bucket) -> mean
+    time_averages: dict[tuple[bool, int], float]  # (is_weekend, time_bucket) -> mean
 
 
 def _compute_aggregates(
@@ -97,21 +100,19 @@ def _compute_aggregates(
         else:
             max_count = 0
 
-        # 3. Time averages: mean count by (day_of_week, time_bucket)
-        time_buckets: dict[tuple[int, int], list[float]] = {}
+        # 3. Time averages: mean count by (is_weekend, time_bucket)
+        time_buckets: dict[tuple[bool, int], list[float]] = {}
         for c in location_counts:
             if c.timestamp <= lookback_start:
                 continue
             if c.count <= baseline * CLOSED_THRESHOLD:
                 continue
-            day_of_week = c.timestamp.weekday()
-            # Convert to Sunday=0 format to match original SQL strftime('%w')
-            day_of_week = (day_of_week + 1) % 7
+            is_weekend = c.timestamp.weekday() >= 5  # Sat=5, Sun=6
             minutes = (
                 c.timestamp.hour * 60
                 + (c.timestamp.minute // TIME_BUCKET_SIZE) * TIME_BUCKET_SIZE
             )
-            key = (day_of_week, minutes)
+            key = (is_weekend, minutes)
             time_buckets.setdefault(key, []).append(c.count)
 
         time_averages = {k: sum(v) / len(v) for k, v in time_buckets.items()}
@@ -190,20 +191,25 @@ def _build_location_status(db: sqlite3.Connection) -> list[LocationStatus]:
         busyness = _calculate_busyness(latest.count, agg.baseline, agg.max_count)
 
         # Calculate vs typical
-        day_of_week = (latest.timestamp.weekday() + 1) % 7
+        is_weekend = latest.timestamp.weekday() >= 5
         minutes = (
             latest.timestamp.hour * 60
             + (latest.timestamp.minute // TIME_BUCKET_SIZE) * TIME_BUCKET_SIZE
         )
-        typical = agg.time_averages.get((day_of_week, minutes))
+        typical = agg.time_averages.get((is_weekend, minutes))
 
         vs_typical = None
         if typical and typical > 0:
             vs_typical = ((latest.count - typical) / typical) * 100
 
-        # Calculate trend
+        # Calculate trend (only meaningful when there's meaningful activity)
         trend: Literal["Increasing", "Steady", "Decreasing"] | None = None
-        if past_count and past_count > 0:
+        if (
+            busyness is not None
+            and busyness >= TREND_MIN_BUSYNESS
+            and past_count
+            and past_count > 0
+        ):
             change = (latest.count - past_count) / past_count
             if change > TREND_THRESHOLD:
                 trend = "Increasing"
