@@ -4,8 +4,8 @@ from loguru import logger
 
 DATABASE_PATH = "/data/middlines.db"
 
-# Number of rows to smooth over. 20 rows at 30 second intervals = 10 min rolling average
-SMOOTHING_WINDOW_ROWS = 20
+# EMA smoothing parameter
+EMA_ALPHA = 0.20
 
 
 def init_db() -> None:
@@ -39,15 +39,33 @@ def init_db() -> None:
     conn.execute("DROP VIEW IF EXISTS smoothed_counts")
     conn.execute(f"""
         CREATE VIEW smoothed_counts AS
-        SELECT
-            location,
-            timestamp,
-            AVG(count) OVER (
-                PARTITION BY location
-                ORDER BY timestamp
-                ROWS BETWEEN {SMOOTHING_WINDOW_ROWS - 1} PRECEDING AND CURRENT ROW
-            ) as smoothed_count
-        FROM counts
+        WITH RECURSIVE
+        base AS (
+            SELECT
+                location, timestamp, count,
+                ROW_NUMBER() OVER (
+                    PARTITION BY location ORDER BY timestamp
+                ) AS rn
+            FROM counts
+        ),
+        ema AS (
+            -- Seed: first row per location in the cutoff window
+            SELECT location, timestamp, rn,
+                   CAST(count AS REAL) AS smoothed_count
+            FROM base
+            WHERE rn = 1
+
+            UNION ALL
+
+            -- Recursive step: EMA formula
+            SELECT
+                b.location, b.timestamp, b.rn,
+                {EMA_ALPHA} * b.count + {1 - EMA_ALPHA} * e.smoothed_count
+            FROM base b
+            JOIN ema e ON b.location = e.location AND b.rn = e.rn + 1
+        )
+        SELECT location, timestamp, smoothed_count
+        FROM ema;
     """)
     conn.commit()
     logger.info("Smoothed counts view created")
