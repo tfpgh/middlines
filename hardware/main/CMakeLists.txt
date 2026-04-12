@@ -13,7 +13,12 @@ set(deps
     "spi_flash"
 )
 
-idf_component_register(SRCS "hardware.c" "fw_update.c"
-                    INCLUDE_DIRS "."
-                    PRIV_INCLUDE_DIRS "${freertos_include}"
-                    PRIV_REQUIRES ${deps})
+idf_component_register(SRCS "app_main.c"
+                            "cloud.c"
+                            "ethernet.c"
+                            "fw_update.c"
+                            "ota_boot.c"
+                            "provisioning.c"
+                     INCLUDE_DIRS "."
+                     PRIV_INCLUDE_DIRS "${freertos_include}"
+                     PRIV_REQUIRES ${deps})
