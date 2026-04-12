@@ -1,0 +1,20 @@
+CompileFlags:
+  CompilationDatabase: build
+  Compiler: /Users/tobypenner/.espressif/tools/xtensa-esp-elf/esp-14.2.0_20250730/xtensa-esp-elf/bin/xtensa-esp32-elf-gcc
+  Remove:
+    - -mlongcalls
+    - -mdynconfig=*
+    - -fno-shrink-wrap
+    - -fstrict-volatile-bitfields
+    - -fno-tree-switch-conversion
+  Add:
+    - -D__XTENSA__=1
+    - -D__XTENSA_WINDOWED_ABI__=1
+    - -isystem
+    - /Users/tobypenner/.espressif/tools/xtensa-esp-elf/esp-14.2.0_20250730/xtensa-esp-elf/lib/gcc/xtensa-esp-elf/14.2.0/include
+    - -isystem
+    - /Users/tobypenner/.espressif/tools/xtensa-esp-elf/esp-14.2.0_20250730/xtensa-esp-elf/lib/gcc/xtensa-esp-elf/14.2.0/include-fixed
+    - -isystem
+    - /Users/tobypenner/.espressif/tools/xtensa-esp-elf/esp-14.2.0_20250730/xtensa-esp-elf/xtensa-esp-elf/include
+Diagnostics:
+  UnusedIncludes: None

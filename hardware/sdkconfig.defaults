@@ -1,0 +1,31 @@
+# --- MbedTLS for Golioth DTLS ---
+CONFIG_MBEDTLS_SSL_PROTO_DTLS=y
+CONFIG_MBEDTLS_PSK_MODES=y
+CONFIG_MBEDTLS_KEY_EXCHANGE_PSK=y
+
+# --- Golioth logging to cloud ---
+CONFIG_GOLIOTH_AUTO_LOG_TO_CLOUD=y
+
+# --- CoAP queue depth (increase if needed) ---
+CONFIG_GOLIOTH_COAP_REQUEST_QUEUE_MAX_ITEMS=20
+CONFIG_GOLIOTH_OTA=y
+
+# --- Ethernet (internal EMAC + external PHY example) ---
+# Olimex ESP32-POE uses the internal ESP32 EMAC with a LAN8720 PHY
+CONFIG_ETH_USE_ESP32_EMAC=y
+CONFIG_ETH_PHY_INTERFACE_RMII=y
+CONFIG_ETH_RMII_CLK_OUTPUT=y
+CONFIG_ETH_RMII_CLK_OUT_GPIO=17
+
+# --- Partition table for OTA ---
+CONFIG_PARTITION_TABLE_TWO_OTA=y
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# --- Flash size ---
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# --- Increase main task stack for Golioth ---
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=10240
+
+# --- NVS (for shell-based credential storage) ---
+CONFIG_NVS_ENCRYPTION=n

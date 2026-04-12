@@ -1,0 +1,27 @@
+[
+  {
+    "label": "IDF: Build",
+    "command": "get_idf && idf.py build",
+    "use_new_terminal": true,
+  },
+  {
+    "label": "IDF: Flash",
+    "command": "get_idf && idf.py -p /dev/cu.usbserial* flash",
+    "use_new_terminal": true,
+  },
+  {
+    "label": "IDF: Monitor",
+    "command": "get_idf && idf.py -p /dev/cu.usbserial* monitor",
+    "use_new_terminal": true,
+  },
+  {
+    "label": "IDF: Build, Flash & Monitor",
+    "command": "get_idf && idf.py -p /dev/cu.usbserial* flash monitor",
+    "use_new_terminal": true,
+  },
+  {
+    "label": "IDF: Menuconfig",
+    "command": "get_idf && idf.py menuconfig",
+    "use_new_terminal": true,
+  },
+]
