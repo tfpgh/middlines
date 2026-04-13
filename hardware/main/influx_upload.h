@@ -13,6 +13,8 @@ typedef struct {
     uint64_t upload_failures;
     uint64_t points_uploaded;
     uint64_t requests_sent;
+    uint64_t immediate_reflushes;
+    uint32_t max_consecutive_sends;
     int last_http_status;
 } influx_upload_metrics_t;
 

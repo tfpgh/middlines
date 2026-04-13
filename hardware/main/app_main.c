@@ -22,9 +22,9 @@
 
 #define TAG "app_main"
 
-#define ADV_BUFFER_CAPACITY 1024
+#define ADV_BUFFER_CAPACITY 512
 #define MAIN_LOOP_INTERVAL_MS 1000
-#define HEARTBEAT_INTERVAL_MS 120000
+#define HEARTBEAT_INTERVAL_MS 10000
 #define ETHERNET_IP_TIMEOUT_MS 30000
 #define GOLIOTH_CONNECT_TIMEOUT_MS 30000
 #define TIME_SYNC_WAIT_MS 1000
@@ -140,7 +140,11 @@ void app_main(void)
     uint32_t last_metrics_log_ms = 0;
     bool credentials_missing = false;
     bool influx_config_missing = false;
+    adv_buffer_metrics_t prev_buffer_metrics = { 0 };
+    influx_upload_metrics_t prev_upload_metrics = { 0 };
     esp_err_t err;
+
+    esp_log_level_set("esp-x509-crt-bundle", ESP_LOG_WARN);
 
     err = init_nvs();
     if (err != ESP_OK) {
@@ -282,11 +286,25 @@ void app_main(void)
         if ((now_ms - last_heartbeat_ms) >= HEARTBEAT_INTERVAL_MS) {
             adv_buffer_metrics_t buffer_metrics = { 0 };
             influx_upload_metrics_t upload_metrics = { 0 };
+            uint32_t elapsed_ms = (last_heartbeat_ms == 0) ? HEARTBEAT_INTERVAL_MS : (now_ms - last_heartbeat_ms);
+            uint64_t seen_delta;
+            uint64_t uploaded_delta;
+            uint64_t dropped_delta;
+            uint64_t request_delta;
+            uint64_t avg_points_per_request = 0;
 
             adv_buffer_get_metrics(&buffer_metrics);
             influx_upload_get_metrics(&upload_metrics);
+            seen_delta = buffer_metrics.packets_seen - prev_buffer_metrics.packets_seen;
+            uploaded_delta = upload_metrics.points_uploaded - prev_upload_metrics.points_uploaded;
+            dropped_delta = buffer_metrics.packets_dropped - prev_buffer_metrics.packets_dropped;
+            request_delta = upload_metrics.requests_sent - prev_upload_metrics.requests_sent;
+            if (request_delta > 0) {
+                avg_points_per_request = uploaded_delta / request_delta;
+            }
+
             ESP_LOGI(TAG,
-                     "Heartbeat #%lu, heap=%lu, eth=%s, golioth=%s, ota=%s%s%s, time=%s, adv=%llu/%lu drop=%llu, up=%llu fail=%llu",
+                     "Heartbeat #%lu, heap=%lu, eth=%s, golioth=%s, ota=%s%s%s, time=%s, adv=%llu/%lu drop=%llu, up=%llu fail=%llu, rate seen=%llus up=%llus drop=%llus req=%llus avg=%llu, flush=%llu maxburst=%lu http=%d",
                      (unsigned long) heartbeat_counter,
                      (unsigned long) esp_get_free_heap_size(),
                      eth_connected ? "up" : "down",
@@ -299,7 +317,17 @@ void app_main(void)
                      (unsigned long) buffer_metrics.count,
                      (unsigned long long) buffer_metrics.packets_dropped,
                      (unsigned long long) upload_metrics.points_uploaded,
-                     (unsigned long long) upload_metrics.upload_failures);
+                     (unsigned long long) upload_metrics.upload_failures,
+                     (unsigned long long) ((seen_delta * 1000ULL) / elapsed_ms),
+                     (unsigned long long) ((uploaded_delta * 1000ULL) / elapsed_ms),
+                     (unsigned long long) ((dropped_delta * 1000ULL) / elapsed_ms),
+                     (unsigned long long) ((request_delta * 1000ULL) / elapsed_ms),
+                     (unsigned long long) avg_points_per_request,
+                     (unsigned long long) (upload_metrics.immediate_reflushes - prev_upload_metrics.immediate_reflushes),
+                     (unsigned long) upload_metrics.max_consecutive_sends,
+                     upload_metrics.last_http_status);
+            prev_buffer_metrics = buffer_metrics;
+            prev_upload_metrics = upload_metrics;
             heartbeat_counter++;
             last_heartbeat_ms = now_ms;
         }

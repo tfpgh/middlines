@@ -20,15 +20,19 @@
 #define MAX_LINE_LENGTH 128
 #define HTTP_TIMEOUT_MS 10000
 #define RESPONSE_BUFFER_SIZE 256
-#define UPLOADER_TASK_STACK_SIZE 4096
+#define UPLOADER_TASK_STACK_SIZE 8192
+#define MAX_CONSECUTIVE_SENDS 16
 
 typedef struct {
     app_state_t *state;
     influx_config_t config;
+    char url[INFLUX_URL_MAX_LEN + INFLUX_DB_MAX_LEN + 96];
+    char auth_header[INFLUX_TOKEN_MAX_LEN + 16];
     advertisement_t batch[MAX_BATCH_POINTS];
     advertisement_t retry_batch[MAX_BATCH_POINTS];
     size_t retry_count;
     influx_upload_metrics_t metrics;
+    esp_http_client_handle_t client;
     bool started;
 } influx_upload_state_t;
 
@@ -63,7 +67,7 @@ static esp_err_t build_write_url(const influx_config_t *config, char *url, size_
     const char *separator = strchr(config->url, '?') ? "&" : "?";
     int written = snprintf(url,
                            url_size,
-                           "%s%sdb=%s&precision=microsecond&accept_partial=false",
+                           "%s%sdb=%s&precision=microsecond&accept_partial=false&no_sync=true",
                            config->url,
                            separator,
                            config->db);
@@ -71,6 +75,40 @@ static esp_err_t build_write_url(const influx_config_t *config, char *url, size_
     if ((written < 0) || ((size_t) written >= url_size)) {
         return ESP_ERR_INVALID_SIZE;
     }
+
+    return ESP_OK;
+}
+
+static void reset_http_client(void)
+{
+    if (s_uploader.client != NULL) {
+        esp_http_client_cleanup(s_uploader.client);
+        s_uploader.client = NULL;
+    }
+}
+
+static esp_err_t ensure_http_client(void)
+{
+    esp_http_client_config_t http_config = {
+        .url = s_uploader.url,
+        .method = HTTP_METHOD_POST,
+        .timeout_ms = HTTP_TIMEOUT_MS,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .keep_alive_enable = true,
+    };
+
+    if (s_uploader.client != NULL) {
+        return ESP_OK;
+    }
+
+    s_uploader.client = esp_http_client_init(&http_config);
+    if (s_uploader.client == NULL) {
+        log_heap_snapshot("HTTP client alloc failed");
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_http_client_set_header(s_uploader.client, "Authorization", s_uploader.auth_header);
+    esp_http_client_set_header(s_uploader.client, "Content-Type", "text/plain; charset=utf-8");
 
     return ESP_OK;
 }
@@ -119,17 +157,8 @@ static esp_err_t send_batch(const influx_config_t *config,
                             size_t count,
                             int *http_status_out)
 {
-    char url[INFLUX_URL_MAX_LEN + INFLUX_DB_MAX_LEN + 96];
-    char auth_header[INFLUX_TOKEN_MAX_LEN + 16];
     char response[RESPONSE_BUFFER_SIZE] = { 0 };
     char *body = NULL;
-    esp_http_client_config_t http_config = {
-        .url = url,
-        .method = HTTP_METHOD_POST,
-        .timeout_ms = HTTP_TIMEOUT_MS,
-        .crt_bundle_attach = esp_crt_bundle_attach,
-    };
-    esp_http_client_handle_t client;
     esp_err_t err;
     size_t body_len;
     int read_len;
@@ -140,54 +169,49 @@ static esp_err_t send_batch(const influx_config_t *config,
         return ESP_ERR_NO_MEM;
     }
 
-    err = build_write_url(config, url, sizeof(url));
+    err = ensure_http_client();
     if (err != ESP_OK) {
         free(body);
         return err;
     }
 
-    snprintf(auth_header, sizeof(auth_header), "Bearer %s", config->token);
+    esp_http_client_set_post_field(s_uploader.client, body, (int) body_len);
 
-    client = esp_http_client_init(&http_config);
-    if (client == NULL) {
-        free(body);
-        log_heap_snapshot("HTTP client alloc failed");
-        return ESP_ERR_NO_MEM;
-    }
-
-    esp_http_client_set_header(client, "Authorization", auth_header);
-    esp_http_client_set_header(client, "Content-Type", "text/plain; charset=utf-8");
-    esp_http_client_set_post_field(client, body, (int) body_len);
-
-    err = esp_http_client_perform(client);
+    err = esp_http_client_perform(s_uploader.client);
     if (err == ESP_OK) {
-        *http_status_out = esp_http_client_get_status_code(client);
+        *http_status_out = esp_http_client_get_status_code(s_uploader.client);
         if ((*http_status_out < 200) || (*http_status_out >= 300)) {
-            read_len = esp_http_client_read_response(client, response, sizeof(response) - 1);
+            read_len = esp_http_client_read_response(
+                s_uploader.client, response, sizeof(response) - 1);
             if (read_len > 0) {
                 response[read_len] = '\0';
                 ESP_LOGW(TAG, "Influx write failed: status=%d body=%s", *http_status_out, response);
             }
             err = ESP_FAIL;
+            reset_http_client();
         }
     } else {
         *http_status_out = -1;
         ESP_LOGW(TAG, "Influx HTTP request failed: %s", esp_err_to_name(err));
+        reset_http_client();
     }
 
-    esp_http_client_cleanup(client);
     free(body);
     return err;
 }
 
 static void uploader_task(void *arg)
 {
+    uint32_t last_rotate_ms = esp_log_timestamp();
+
     (void) arg;
 
     while (true) {
         size_t batch_count = 0;
+        uint32_t consecutive_sends = 0;
         int http_status = -1;
         esp_err_t err;
+        uint32_t now_ms;
 
         if ((xEventGroupGetBits(s_uploader.state->state_event_group) & ETH_CONNECTED_BIT) == 0) {
             vTaskDelay(pdMS_TO_TICKS(UPLOAD_INTERVAL_MS));
@@ -199,38 +223,66 @@ static void uploader_task(void *arg)
             continue;
         }
 
-        if (s_uploader.retry_count > 0) {
-            memcpy(s_uploader.batch,
-                   s_uploader.retry_batch,
-                   s_uploader.retry_count * sizeof(s_uploader.batch[0]));
-            batch_count = s_uploader.retry_count;
+        now_ms = esp_log_timestamp();
+        if ((s_uploader.retry_count == 0) && ((now_ms - last_rotate_ms) >= UPLOAD_INTERVAL_MS)) {
+            if (adv_buffer_rotate_window()) {
+                last_rotate_ms = now_ms;
+            }
+        }
+
+        while (consecutive_sends < MAX_CONSECUTIVE_SENDS) {
+            if (s_uploader.retry_count > 0) {
+                memcpy(s_uploader.batch,
+                       s_uploader.retry_batch,
+                       s_uploader.retry_count * sizeof(s_uploader.batch[0]));
+                batch_count = s_uploader.retry_count;
+            } else {
+                batch_count = adv_buffer_drain(s_uploader.batch, MAX_BATCH_POINTS);
+            }
+
+            if (batch_count == 0) {
+                break;
+            }
+
+            err = send_batch(&s_uploader.config, s_uploader.batch, batch_count, &http_status);
+            s_uploader.metrics.requests_sent++;
+            s_uploader.metrics.last_http_status = http_status;
+            consecutive_sends++;
+
+            if (consecutive_sends > s_uploader.metrics.max_consecutive_sends) {
+                s_uploader.metrics.max_consecutive_sends = consecutive_sends;
+            }
+
+            if (err == ESP_OK) {
+                s_uploader.metrics.upload_successes++;
+                s_uploader.metrics.points_uploaded += batch_count;
+                s_uploader.retry_count = 0;
+            } else {
+                s_uploader.metrics.upload_failures++;
+                memcpy(s_uploader.retry_batch,
+                       s_uploader.batch,
+                       batch_count * sizeof(s_uploader.batch[0]));
+                s_uploader.retry_count = batch_count;
+                break;
+            }
+
+            if (batch_count == MAX_BATCH_POINTS) {
+                s_uploader.metrics.immediate_reflushes++;
+                continue;
+            }
+        }
+
+        if (consecutive_sends == 0) {
+            now_ms = esp_log_timestamp();
+            if ((now_ms - last_rotate_ms) < UPLOAD_INTERVAL_MS) {
+                vTaskDelay(pdMS_TO_TICKS(UPLOAD_INTERVAL_MS - (now_ms - last_rotate_ms)));
+            } else {
+                taskYIELD();
+            }
+        } else if (consecutive_sends >= MAX_CONSECUTIVE_SENDS) {
+            taskYIELD();
         } else {
-            batch_count = adv_buffer_drain(s_uploader.batch, MAX_BATCH_POINTS);
-        }
-
-        if (batch_count == 0) {
-            vTaskDelay(pdMS_TO_TICKS(UPLOAD_INTERVAL_MS));
-            continue;
-        }
-
-        err = send_batch(&s_uploader.config, s_uploader.batch, batch_count, &http_status);
-        s_uploader.metrics.requests_sent++;
-        s_uploader.metrics.last_http_status = http_status;
-
-        if (err == ESP_OK) {
-            s_uploader.metrics.upload_successes++;
-            s_uploader.metrics.points_uploaded += batch_count;
-            s_uploader.retry_count = 0;
-        } else {
-            s_uploader.metrics.upload_failures++;
-            memcpy(s_uploader.retry_batch,
-                   s_uploader.batch,
-                   batch_count * sizeof(s_uploader.batch[0]));
-            s_uploader.retry_count = batch_count;
-        }
-
-        if (batch_count < MAX_BATCH_POINTS) {
-            vTaskDelay(pdMS_TO_TICKS(UPLOAD_INTERVAL_MS));
+            vTaskDelay(pdMS_TO_TICKS(10));
         }
     }
 }
@@ -246,6 +298,15 @@ esp_err_t influx_upload_start(app_state_t *state, const influx_config_t *config)
     memset(&s_uploader, 0, sizeof(s_uploader));
     s_uploader.state = state;
     s_uploader.config = *config;
+
+    if (build_write_url(&s_uploader.config, s_uploader.url, sizeof(s_uploader.url)) != ESP_OK) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    snprintf(s_uploader.auth_header,
+             sizeof(s_uploader.auth_header),
+             "Bearer %s",
+             s_uploader.config.token);
 
     log_heap_snapshot("before uploader task create");
 
