@@ -61,9 +61,9 @@ services:
   influxdb:
     image: influxdb:3-core
     restart: unless-stopped
+    command: ["serve", "--node-id", "middlines"]
     environment:
       <<: *shared-environment
-      INFLUXDB3_NODE_ID: middlines
       INFLUXDB3_AUTH_TOKEN: ${INFLUXDB3_AUTH_TOKEN}
     volumes:
       - influxdb-data:/var/lib/influxdb3
