@@ -68,11 +68,11 @@ services:
     volumes:
       - ./data/influxdb:/home/influxdb3/.influxdb
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://localhost:8181/health || exit 1"]
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8181' 2>/dev/null"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 15s
+      start_period: 20s
 
   frontend:
     build: ./frontend
