@@ -81,8 +81,11 @@ services:
     environment:
       <<: *shared-environment
       SESSION_SECRET_KEY: ${INFLUXDB3_UI_SESSION_SECRET}
+      DEFAULT_INFLUX_SERVER: https://data.middlines.com
+      DEFAULT_API_TOKEN: ${INFLUXDB3_AUTH_TOKEN}
+      DEFAULT_INFLUX_DATABASE: middlines
+      DEFAULT_SERVER_NAME: middlines
     volumes:
-      - ./influxdb3-ui/config:/app-root/config:ro
       - ./data/influxdb3-ui:/db:rw
     depends_on:
       influxdb:
