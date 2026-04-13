@@ -66,13 +66,13 @@ services:
       <<: *shared-environment
       INFLUXDB3_AUTH_TOKEN: ${INFLUXDB3_AUTH_TOKEN}
     volumes:
-      - influxdb-data:/var/lib/influxdb3
+      - ./data/influxdb:/home/influxdb3/.influxdb
     healthcheck:
-      test: ["CMD", "influxdb3", "ping", "--host", "http://localhost:8181"]
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8181/health || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 10s
+      start_period: 15s
 
   frontend:
     build: ./frontend
@@ -97,5 +97,3 @@ services:
     environment:
       <<: *shared-environment
 
-volumes:
-  influxdb-data:
