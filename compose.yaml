@@ -63,6 +63,7 @@ services:
     restart: unless-stopped
     environment:
       <<: *shared-environment
+      INFLUXDB3_NODE_ID: middlines
       INFLUXDB3_AUTH_TOKEN: ${INFLUXDB3_AUTH_TOKEN}
     volumes:
       - influxdb-data:/var/lib/influxdb3
