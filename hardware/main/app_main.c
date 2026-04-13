@@ -1,5 +1,6 @@
 #include "esp_app_desc.h"
 #include "esp_err.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
@@ -21,7 +22,7 @@
 
 #define TAG "app_main"
 
-#define ADV_BUFFER_CAPACITY 4096
+#define ADV_BUFFER_CAPACITY 1024
 #define MAIN_LOOP_INTERVAL_MS 1000
 #define HEARTBEAT_INTERVAL_MS 120000
 #define ETHERNET_IP_TIMEOUT_MS 30000
@@ -37,13 +38,35 @@
 static app_state_t s_app_state;
 static influx_config_t s_influx_config;
 
+static void log_heap_snapshot(const char *context)
+{
+    ESP_LOGI(TAG,
+             "Heap %s: free=%lu largest=%lu min=%lu",
+             context,
+             (unsigned long) esp_get_free_heap_size(),
+             (unsigned long) heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT),
+             (unsigned long) esp_get_minimum_free_heap_size());
+}
+
 static esp_err_t start_influx_pipeline(app_state_t *state, const influx_config_t *config)
 {
     esp_err_t err;
 
+    log_heap_snapshot("before influx pipeline");
+
     if (!adv_buffer_is_initialized() && !adv_buffer_init(ADV_BUFFER_CAPACITY)) {
         return ESP_ERR_NO_MEM;
     }
+
+    log_heap_snapshot("after adv buffer init");
+
+    err = ble_scan_start();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start BLE scan: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    log_heap_snapshot("after BLE start");
 
     err = influx_upload_start(state, config);
     if (err != ESP_OK) {
@@ -51,11 +74,7 @@ static esp_err_t start_influx_pipeline(app_state_t *state, const influx_config_t
         return err;
     }
 
-    err = ble_scan_start();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start BLE scan: %s", esp_err_to_name(err));
-        return err;
-    }
+    log_heap_snapshot("after uploader start");
 
     state->influx_pipeline_started = true;
     return ESP_OK;
@@ -131,6 +150,8 @@ void app_main(void)
         }
     }
 
+    log_heap_snapshot("after NVS init");
+
     err = ethernet_init_once(&s_app_state);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize platform services: %s", esp_err_to_name(err));
@@ -147,6 +168,8 @@ void app_main(void)
         }
     }
     s_app_state.time_sync_initialized = true;
+
+    log_heap_snapshot("after platform init");
 
     detect_pending_ota_state(&s_app_state);
 
@@ -188,7 +211,7 @@ void app_main(void)
             err = time_sync_wait_for_valid(TIME_SYNC_WAIT_MS);
             if (err == ESP_OK) {
                 s_app_state.time_synced = true;
-                ESP_LOGI(TAG, "System time synchronized; uploader timestamps are now UTC epoch milliseconds");
+                ESP_LOGI(TAG, "System time synchronized; uploader timestamps are now UTC epoch microseconds");
             }
         }
 

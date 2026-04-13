@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "esp_crt_bundle.h"
+#include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -15,14 +16,16 @@
 #define TAG "influx_upload"
 
 #define UPLOAD_INTERVAL_MS 1000
-#define MAX_BATCH_POINTS 512
+#define MAX_BATCH_POINTS 128
 #define MAX_LINE_LENGTH 128
 #define HTTP_TIMEOUT_MS 10000
 #define RESPONSE_BUFFER_SIZE 256
+#define UPLOADER_TASK_STACK_SIZE 4096
 
 typedef struct {
     app_state_t *state;
     influx_config_t config;
+    advertisement_t batch[MAX_BATCH_POINTS];
     advertisement_t retry_batch[MAX_BATCH_POINTS];
     size_t retry_count;
     influx_upload_metrics_t metrics;
@@ -30,6 +33,16 @@ typedef struct {
 } influx_upload_state_t;
 
 static influx_upload_state_t s_uploader;
+
+static void log_heap_snapshot(const char *context)
+{
+    ESP_LOGI(TAG,
+             "Heap %s: free=%lu largest=%lu min=%lu",
+             context,
+             (unsigned long) esp_get_free_heap_size(),
+             (unsigned long) heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT),
+             (unsigned long) esp_get_minimum_free_heap_size());
+}
 
 static void escape_tag_value(const char *input, char *output, size_t output_size)
 {
@@ -50,7 +63,7 @@ static esp_err_t build_write_url(const influx_config_t *config, char *url, size_
     const char *separator = strchr(config->url, '?') ? "&" : "?";
     int written = snprintf(url,
                            url_size,
-                           "%s%sdb=%s&precision=millisecond&accept_partial=false",
+                           "%s%sdb=%s&precision=microsecond&accept_partial=false",
                            config->url,
                            separator,
                            config->db);
@@ -87,7 +100,7 @@ static size_t build_line_protocol(const influx_config_t *config,
                                escaped_node,
                                (unsigned long long) batch[i].mac,
                                (long long) batch[i].rssi,
-                               (unsigned long long) batch[i].timestamp_ms);
+                               (unsigned long long) batch[i].timestamp_us);
 
         if ((written < 0) || ((size_t) written >= (body_size - offset))) {
             free(body);
@@ -123,6 +136,7 @@ static esp_err_t send_batch(const influx_config_t *config,
 
     body_len = build_line_protocol(config, batch, count, &body);
     if ((body_len == 0) || (body == NULL)) {
+        log_heap_snapshot("line protocol alloc failed");
         return ESP_ERR_NO_MEM;
     }
 
@@ -137,6 +151,7 @@ static esp_err_t send_batch(const influx_config_t *config,
     client = esp_http_client_init(&http_config);
     if (client == NULL) {
         free(body);
+        log_heap_snapshot("HTTP client alloc failed");
         return ESP_ERR_NO_MEM;
     }
 
@@ -167,8 +182,6 @@ static esp_err_t send_batch(const influx_config_t *config,
 
 static void uploader_task(void *arg)
 {
-    advertisement_t batch[MAX_BATCH_POINTS];
-
     (void) arg;
 
     while (true) {
@@ -187,10 +200,12 @@ static void uploader_task(void *arg)
         }
 
         if (s_uploader.retry_count > 0) {
-            memcpy(batch, s_uploader.retry_batch, s_uploader.retry_count * sizeof(batch[0]));
+            memcpy(s_uploader.batch,
+                   s_uploader.retry_batch,
+                   s_uploader.retry_count * sizeof(s_uploader.batch[0]));
             batch_count = s_uploader.retry_count;
         } else {
-            batch_count = adv_buffer_drain(batch, MAX_BATCH_POINTS);
+            batch_count = adv_buffer_drain(s_uploader.batch, MAX_BATCH_POINTS);
         }
 
         if (batch_count == 0) {
@@ -198,7 +213,7 @@ static void uploader_task(void *arg)
             continue;
         }
 
-        err = send_batch(&s_uploader.config, batch, batch_count, &http_status);
+        err = send_batch(&s_uploader.config, s_uploader.batch, batch_count, &http_status);
         s_uploader.metrics.requests_sent++;
         s_uploader.metrics.last_http_status = http_status;
 
@@ -208,7 +223,9 @@ static void uploader_task(void *arg)
             s_uploader.retry_count = 0;
         } else {
             s_uploader.metrics.upload_failures++;
-            memcpy(s_uploader.retry_batch, batch, batch_count * sizeof(batch[0]));
+            memcpy(s_uploader.retry_batch,
+                   s_uploader.batch,
+                   batch_count * sizeof(s_uploader.batch[0]));
             s_uploader.retry_count = batch_count;
         }
 
@@ -230,12 +247,21 @@ esp_err_t influx_upload_start(app_state_t *state, const influx_config_t *config)
     s_uploader.state = state;
     s_uploader.config = *config;
 
-    task_created = xTaskCreate(uploader_task, "influx_upload", 8192, NULL, 4, NULL);
+    log_heap_snapshot("before uploader task create");
+
+    task_created = xTaskCreate(uploader_task,
+                               "influx_upload",
+                               UPLOADER_TASK_STACK_SIZE,
+                               NULL,
+                               4,
+                               NULL);
     if (task_created != pdPASS) {
+        log_heap_snapshot("uploader task create failed");
         return ESP_ERR_NO_MEM;
     }
 
     s_uploader.started = true;
+    log_heap_snapshot("after uploader task create");
     return ESP_OK;
 }
 

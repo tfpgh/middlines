@@ -2,7 +2,6 @@
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
 
 #include "adv_buffer.h"
 
@@ -16,14 +15,16 @@ typedef struct {
     uint64_t packets_enqueued;
     uint64_t packets_dropped;
     uint32_t high_watermark;
-    SemaphoreHandle_t mutex;
+    portMUX_TYPE lock;
 } adv_buffer_state_t;
 
-static adv_buffer_state_t s_buffer;
+static adv_buffer_state_t s_buffer = {
+    .lock = portMUX_INITIALIZER_UNLOCKED,
+};
 
 bool adv_buffer_is_initialized(void)
 {
-    return (s_buffer.entries != NULL) && (s_buffer.mutex != NULL);
+    return s_buffer.entries != NULL;
 }
 
 bool adv_buffer_init(size_t capacity)
@@ -34,13 +35,6 @@ bool adv_buffer_init(size_t capacity)
 
     s_buffer.entries = calloc(capacity, sizeof(advertisement_t));
     if (s_buffer.entries == NULL) {
-        return false;
-    }
-
-    s_buffer.mutex = xSemaphoreCreateMutex();
-    if (s_buffer.mutex == NULL) {
-        free(s_buffer.entries);
-        s_buffer.entries = NULL;
         return false;
     }
 
@@ -56,7 +50,7 @@ bool adv_buffer_push(const advertisement_t *adv)
         return false;
     }
 
-    xSemaphoreTake(s_buffer.mutex, portMAX_DELAY);
+    portENTER_CRITICAL(&s_buffer.lock);
 
     s_buffer.packets_seen++;
     if (s_buffer.count == s_buffer.capacity) {
@@ -74,7 +68,7 @@ bool adv_buffer_push(const advertisement_t *adv)
         s_buffer.high_watermark = (uint32_t) s_buffer.count;
     }
 
-    xSemaphoreGive(s_buffer.mutex);
+    portEXIT_CRITICAL(&s_buffer.lock);
     return stored;
 }
 
@@ -86,14 +80,14 @@ size_t adv_buffer_drain(advertisement_t *out, size_t max_items)
         return 0;
     }
 
-    xSemaphoreTake(s_buffer.mutex, portMAX_DELAY);
+    portENTER_CRITICAL(&s_buffer.lock);
     while ((drained < max_items) && (s_buffer.count > 0)) {
         out[drained] = s_buffer.entries[s_buffer.tail];
         s_buffer.tail = (s_buffer.tail + 1) % s_buffer.capacity;
         s_buffer.count--;
         drained++;
     }
-    xSemaphoreGive(s_buffer.mutex);
+    portEXIT_CRITICAL(&s_buffer.lock);
 
     return drained;
 }
@@ -104,7 +98,7 @@ void adv_buffer_get_metrics(adv_buffer_metrics_t *metrics)
         return;
     }
 
-    xSemaphoreTake(s_buffer.mutex, portMAX_DELAY);
+    portENTER_CRITICAL(&s_buffer.lock);
     memset(metrics, 0, sizeof(*metrics));
     metrics->packets_seen = s_buffer.packets_seen;
     metrics->packets_enqueued = s_buffer.packets_enqueued;
@@ -112,5 +106,5 @@ void adv_buffer_get_metrics(adv_buffer_metrics_t *metrics)
     metrics->high_watermark = s_buffer.high_watermark;
     metrics->count = (uint32_t) s_buffer.count;
     metrics->capacity = (uint32_t) s_buffer.capacity;
-    xSemaphoreGive(s_buffer.mutex);
+    portEXIT_CRITICAL(&s_buffer.lock);
 }

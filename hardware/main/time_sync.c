@@ -96,10 +96,10 @@ esp_err_t time_sync_wait_for_valid(uint32_t timeout_ms)
     return ESP_ERR_TIMEOUT;
 }
 
-uint64_t time_sync_now_ms(void)
+uint64_t time_sync_now_us(void)
 {
     struct timeval now;
 
     gettimeofday(&now, NULL);
-    return ((uint64_t) now.tv_sec * 1000ULL) + ((uint64_t) now.tv_usec / 1000ULL);
+    return ((uint64_t) now.tv_sec * 1000000ULL) + (uint64_t) now.tv_usec;
 }

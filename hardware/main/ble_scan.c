@@ -2,6 +2,7 @@
 #include <stdbool.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
 
@@ -22,6 +23,16 @@ static bool s_scan_active;
 
 void ble_store_config_init(void);
 static int gap_event(struct ble_gap_event *event, void *arg);
+
+static void log_heap_snapshot(const char *context)
+{
+    ESP_LOGI(TAG,
+             "Heap %s: free=%lu largest=%lu min=%lu",
+             context,
+             (unsigned long) esp_get_free_heap_size(),
+             (unsigned long) heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT),
+             (unsigned long) esp_get_minimum_free_heap_size());
+}
 
 static uint64_t mac_to_u64(const uint8_t addr[6])
 {
@@ -71,7 +82,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
             return 0;
         }
 
-        adv.timestamp_ms = time_sync_now_ms();
+        adv.timestamp_us = time_sync_now_us();
         adv.mac = mac_to_u64(event->disc.addr.val);
         adv.rssi = event->disc.rssi;
         adv_buffer_push(&adv);
@@ -129,11 +140,14 @@ esp_err_t ble_scan_start(void)
         return ESP_OK;
     }
 
+    log_heap_snapshot("before NimBLE init");
     err = nimble_port_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize NimBLE: %s", esp_err_to_name(err));
+        log_heap_snapshot("after failed NimBLE init");
         return err;
     }
+    log_heap_snapshot("after NimBLE init");
 
     ble_hs_cfg.reset_cb = on_reset;
     ble_hs_cfg.sync_cb = on_sync;
@@ -145,5 +159,6 @@ esp_err_t ble_scan_start(void)
 
     nimble_port_freertos_init(host_task);
     s_started = true;
+    log_heap_snapshot("after NimBLE host task start");
     return ESP_OK;
 }
