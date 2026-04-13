@@ -1,4 +1,5 @@
 #include "esp_err.h"
+#include "esp_log.h"
 
 #include "cloud.h"
 #include "provisioning.h"

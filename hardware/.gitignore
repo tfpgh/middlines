@@ -1,5 +1,1 @@
-build/
-credentials/
-sdkconfig
-.clangd
-.zed/
+provisioning/

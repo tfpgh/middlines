@@ -20,8 +20,12 @@ typedef struct {
     esp_eth_handle_t eth_handle;
     struct golioth_client *golioth_client;
     bool platform_initialized;
+    bool time_sync_initialized;
+    bool time_sync_started;
+    bool time_synced;
     bool ota_started;
     bool ota_pending_verify;
     bool ota_confirmed;
+    bool influx_pipeline_started;
     uint32_t boot_time_ms;
 } app_state_t;

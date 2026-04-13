@@ -12,17 +12,17 @@ OUT_DIR="${PROJECT_DIR}/build/credentials"
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") <credentials.csv> [port]
+Usage: $(basename "$0") <config.csv> [port]
 
-Generate an NVS image from a credentials CSV and flash it to the device.
+Generate an NVS image from a device config CSV and flash it to the device.
 
 Arguments:
-  credentials.csv   Path to the CSV file for one device
+  config.csv        Path to the CSV file for one device
   port              Optional serial port. Defaults to ${DEFAULT_PORT_GLOB}
 
 Example:
-  $(basename "$0") credentials/device-a.csv
-  $(basename "$0") credentials/device-a.csv /dev/cu.usbserial-0001
+  $(basename "$0") provisioning/device-a.csv
+  $(basename "$0") provisioning/device-a.csv /dev/cu.usbserial-0001
 EOF
 }
 
@@ -40,7 +40,7 @@ CSV_PATH="$1"
 PORT_PATTERN="${2:-$DEFAULT_PORT_GLOB}"
 
 if [[ ! -f "$CSV_PATH" ]]; then
-  echo "Credentials CSV not found: $CSV_PATH"
+  echo "Config CSV not found: $CSV_PATH"
   exit 1
 fi
 
