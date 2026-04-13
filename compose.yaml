@@ -74,6 +74,20 @@ services:
       retries: 5
       start_period: 20s
 
+  influxdb3-ui:
+    image: influxdata/influxdb3-ui
+    restart: unless-stopped
+    command: ["--mode=admin"]
+    environment:
+      <<: *shared-environment
+      SESSION_SECRET_KEY: ${INFLUXDB3_UI_SESSION_SECRET}
+    volumes:
+      - ./influxdb3-ui/config:/app-root/config:ro
+      - ./data/influxdb3-ui:/db:rw
+    depends_on:
+      influxdb:
+        condition: service_healthy
+
   frontend:
     build: ./frontend
     restart: unless-stopped
@@ -92,6 +106,8 @@ services:
     depends_on:
       influxdb:
         condition: service_healthy
+      influxdb3-ui:
+        condition: service_started
       frontend:
         condition: service_started
     environment:

@@ -219,3 +219,5 @@ __marimo__/
 .streamlit/secrets.toml
 
 middlines.db
+data/influxdb/
+data/influxdb3-ui/

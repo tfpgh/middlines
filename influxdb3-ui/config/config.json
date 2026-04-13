@@ -1,0 +1,5 @@
+{
+  "DEFAULT_INFLUX_SERVER": "https://data.middlines.com",
+  "DEFAULT_INFLUX_DATABASE": "middlines",
+  "DEFAULT_SERVER_NAME": "middlines"
+}
