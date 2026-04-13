@@ -58,12 +58,43 @@ services:
     environment:
       <<: *shared-environment
 
+  influxdb:
+    image: influxdb:3-core
+    restart: unless-stopped
+    environment:
+      <<: *shared-environment
+      INFLUXDB3_AUTH_TOKEN: ${INFLUXDB3_AUTH_TOKEN}
+    volumes:
+      - influxdb-data:/var/lib/influxdb3
+    healthcheck:
+      test: ["CMD", "influxdb3", "ping", "--host", "http://localhost:8181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
   frontend:
     build: ./frontend
     restart: unless-stopped
-    ports:
-      - "80:80"
     depends_on:
       - api
     environment:
       <<: *shared-environment
+
+  nginx-proxy:
+    image: nginx:1.29-trixie
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx-proxy/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      influxdb:
+        condition: service_healthy
+      frontend:
+        condition: service_started
+    environment:
+      <<: *shared-environment
+
+volumes:
+  influxdb-data:
