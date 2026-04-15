@@ -99,6 +99,7 @@ void app_main(void)
     uint32_t next_influx_config_attempt_ms = 0;
     uint32_t next_control_config_attempt_ms = 0;
     uint32_t eth_backoff_ms = 0;
+    bool ota_checked = false;
     bool influx_config_missing = false;
     bool control_config_missing = false;
     bool prev_eth_connected = false;
@@ -108,6 +109,8 @@ void app_main(void)
     esp_err_t err;
 
     esp_log_level_set("esp-x509-crt-bundle", ESP_LOG_WARN);
+
+    ESP_LOGI(TAG, "app_main running!");
 
     err = init_nvs();
     if (err != ESP_OK) {
@@ -174,7 +177,18 @@ void app_main(void)
             }
         }
 
-        if (s_app_state.time_synced && !s_app_state.influx_pipeline_started
+        if (s_app_state.time_synced && !ota_checked) {
+            err = control_config_load(&s_control_config);
+            if (err == ESP_OK) {
+                err = influx_config_load(&s_influx_config);
+                if (err == ESP_OK) {
+                    control_check_ota_once(&s_influx_config, &s_control_config, firmware_version);
+                }
+            }
+            ota_checked = true;
+        }
+
+        if (s_app_state.time_synced && ota_checked && !s_app_state.influx_pipeline_started
             && (now_ms >= next_influx_config_attempt_ms)) {
             err = influx_config_load(&s_influx_config);
             if (err == ESP_OK) {

@@ -426,6 +426,64 @@ static void control_task(void *arg)
     }
 }
 
+esp_err_t control_check_ota_once(const influx_config_t *influx_config,
+                                 const control_config_t *control_config,
+                                 const char *current_version)
+{
+    control_manifest_t manifest;
+    esp_err_t err;
+
+    if ((influx_config == NULL) || (control_config == NULL) || (current_version == NULL)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    memset(&s_control, 0, sizeof(s_control));
+
+    if (snprintf(s_control.current_version,
+                 sizeof(s_control.current_version),
+                 "%s",
+                 current_version)
+        >= (int) sizeof(s_control.current_version)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    if (snprintf(s_control.manifest_url,
+                 sizeof(s_control.manifest_url),
+                 "%s/node/%s/manifest",
+                 control_config->url,
+                 influx_config->node)
+        >= (int) sizeof(s_control.manifest_url)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    if (snprintf(s_control.auth_header,
+                 sizeof(s_control.auth_header),
+                 "Bearer %s",
+                 control_config->token)
+        >= (int) sizeof(s_control.auth_header)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    ESP_LOGI(TAG, "Pre-BLE OTA check, current version: %s", current_version);
+    err = fetch_manifest(&manifest);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Pre-BLE OTA manifest fetch failed: %s", esp_err_to_name(err));
+        memset(&s_control, 0, sizeof(s_control));
+        return err;
+    }
+
+    if (manifest.has_firmware
+        && (strcmp(manifest.firmware_version, s_control.current_version) != 0)) {
+        ESP_LOGI(TAG,
+                 "Pre-BLE OTA update available %s -> %s, applying",
+                 s_control.current_version,
+                 manifest.firmware_version);
+        return perform_ota(&manifest);
+    }
+
+    ESP_LOGI(TAG, "Pre-BLE OTA check complete, firmware up to date");
+    memset(&s_control, 0, sizeof(s_control));
+    return ESP_OK;
+}
+
 esp_err_t control_init(app_state_t *state,
                        const influx_config_t *influx_config,
                        const control_config_t *control_config,
