@@ -32,6 +32,7 @@
 #define RETRY_BACKOFF_MAX_MS 60000
 #define PROVISIONING_RETRY_MS 60000
 #define OTA_BOOT_CONFIRM_DELAY_MS 5000
+#define OTA_CHECK_TASK_STACK_SIZE 12288
 
 static app_state_t s_app_state;
 static influx_config_t s_influx_config;
@@ -74,6 +75,35 @@ static esp_err_t start_influx_pipeline(app_state_t *state, const influx_config_t
     return ESP_OK;
 }
 
+typedef struct {
+    bool       *done;
+    const char *firmware_version;
+} ota_check_task_arg_t;
+
+static void ota_check_task(void *arg)
+{
+    ota_check_task_arg_t *ctx = (ota_check_task_arg_t *) arg;
+    esp_err_t err;
+
+    err = control_config_load(&s_control_config);
+    if (err == ESP_OK) {
+        err = influx_config_load(&s_influx_config);
+        if (err == ESP_OK) {
+            err = control_check_ota_once(&s_influx_config,
+                                         &s_control_config,
+                                         ctx->firmware_version);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG,
+                         "Pre-BLE OTA check failed (%s), continuing to BLE start",
+                         esp_err_to_name(err));
+            }
+        }
+    }
+
+    *ctx->done = true;
+    vTaskDelete(NULL);
+}
+
 static uint32_t next_backoff_delay(uint32_t current_delay)
 {
     if (current_delay == 0) {
@@ -99,7 +129,9 @@ void app_main(void)
     uint32_t next_influx_config_attempt_ms = 0;
     uint32_t next_control_config_attempt_ms = 0;
     uint32_t eth_backoff_ms = 0;
+    bool ota_check_started = false;
     bool ota_checked = false;
+    static ota_check_task_arg_t ota_arg;
     bool influx_config_missing = false;
     bool control_config_missing = false;
     bool prev_eth_connected = false;
@@ -175,20 +207,19 @@ void app_main(void)
             }
         }
 
-        if (s_app_state.time_synced && !ota_checked) {
-            err = control_config_load(&s_control_config);
-            if (err == ESP_OK) {
-                err = influx_config_load(&s_influx_config);
-                if (err == ESP_OK) {
-                    err = control_check_ota_once(&s_influx_config, &s_control_config, firmware_version);
-                    if (err != ESP_OK) {
-                        ESP_LOGW(TAG,
-                                 "Pre-BLE OTA check failed (%s), continuing to BLE start",
-                                 esp_err_to_name(err));
-                    }
-                }
+        if (s_app_state.time_synced && !ota_check_started) {
+            ota_arg.done             = &ota_checked;
+            ota_arg.firmware_version = firmware_version;
+            if (xTaskCreate(ota_check_task,
+                            "ota_check",
+                            OTA_CHECK_TASK_STACK_SIZE,
+                            &ota_arg,
+                            4,
+                            NULL) != pdPASS) {
+                ESP_LOGE(TAG, "Failed to create OTA check task, skipping");
+                ota_checked = true;
             }
-            ota_checked = true;
+            ota_check_started = true;
         }
 
         if (s_app_state.time_synced && ota_checked && !s_app_state.influx_pipeline_started
