@@ -44,6 +44,7 @@ CONFIG_BT_NIMBLE_SECURITY_ENABLE=n
 # --- NVS (for shell-based credential storage) ---
 CONFIG_NVS_ENCRYPTION=n
 CONFIG_LWIP_DHCP_GET_NTP_SRV=y
+CONFIG_LWIP_SNTP_MAX_SERVERS=3
 
 # --- Smaller release-oriented build ---
 CONFIG_COMPILER_OPTIMIZATION_SIZE=y
