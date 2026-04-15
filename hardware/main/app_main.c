@@ -32,7 +32,7 @@
 #define RETRY_BACKOFF_MAX_MS 60000
 #define PROVISIONING_RETRY_MS 60000
 #define OTA_BOOT_CONFIRM_DELAY_MS 5000
-#define OTA_CHECK_TASK_STACK_SIZE 12288
+#define OTA_CHECK_TASK_STACK_SIZE 20480
 
 static app_state_t s_app_state;
 static influx_config_t s_influx_config;
