@@ -115,7 +115,6 @@ def init_control_db() -> None:
             last_seen_at TEXT,
             last_manifest_fetch_at TEXT,
             last_ip TEXT,
-            last_event TEXT,
             updated_at TEXT NOT NULL
         )
         """
@@ -414,7 +413,7 @@ def fetch_admin_dashboard_data() -> tuple[list[sqlite3.Row], list[sqlite3.Row]]:
     nodes = db.execute(
         """
         SELECT n.node, n.token, n.poll_interval_s, n.current_version, n.last_seen_at,
-               n.last_manifest_fetch_at, n.last_ip, n.last_event,
+               n.last_manifest_fetch_at, n.last_ip,
                ds.restart_nonce, fa.version AS target_version
         FROM nodes n
         LEFT JOIN node_desired_state ds ON ds.node = n.node
@@ -438,7 +437,7 @@ def fetch_node_detail(node: str) -> tuple[sqlite3.Row, list[sqlite3.Row]]:
     row = db.execute(
         """
         SELECT n.node, n.token, n.poll_interval_s, n.current_version, n.last_seen_at,
-               n.last_manifest_fetch_at, n.last_ip, n.last_event,
+               n.last_manifest_fetch_at, n.last_ip,
                ds.restart_nonce, fa.id AS target_firmware_id, fa.version AS target_version
         FROM nodes n
         LEFT JOIN node_desired_state ds ON ds.node = n.node
@@ -637,8 +636,7 @@ def admin_dashboard(request: Request) -> HTMLResponse:
         f"<tr><td><a href='{PUBLIC_API_PREFIX}/admin/nodes/{escape(row['node'])}'>{escape(row['node'])}</a></td>"
         f"<td>{escape(row['current_version'] or 'unknown')}</td>"
         f"<td>{escape(row['target_version'] or 'none')}</td>"
-        f"<td>{escape(row['last_seen_at'] or 'never')}</td>"
-        f"<td>{escape(row['last_event'] or '')}</td></tr>"
+        f"<td>{escape(row['last_seen_at'] or 'never')}</td></tr>"
         for row in nodes
     )
     artifact_rows = "".join(
@@ -660,7 +658,7 @@ def admin_dashboard(request: Request) -> HTMLResponse:
       <div class='card'>
         <h2>Nodes</h2>
         <table>
-          <thead><tr><th>Node</th><th>Current</th><th>Target</th><th>Last Seen</th><th>Last Event</th></tr></thead>
+          <thead><tr><th>Node</th><th>Current</th><th>Target</th><th>Last Seen</th></tr></thead>
           <tbody>{node_rows}</tbody>
         </table>
       </div>
