@@ -110,8 +110,6 @@ void app_main(void)
 
     esp_log_level_set("esp-x509-crt-bundle", ESP_LOG_WARN);
 
-    ESP_LOGI(TAG, "app_main running!");
-
     err = init_nvs();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize NVS: %s", esp_err_to_name(err));
