@@ -1,3 +1,9 @@
+# --- TLS memory optimisation ---
+# Allocate SSL I/O record buffers (16KB each) only during active use instead of
+# holding them for the lifetime of the connection. Keeps idle keep-alive connections
+# from exhausting heap when a second TLS connection is opened concurrently.
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+
 # --- HTTPS-only TLS profile ---
 # CONFIG_MBEDTLS_SSL_PROTO_DTLS is not set
 # CONFIG_MBEDTLS_PSK_MODES is not set
