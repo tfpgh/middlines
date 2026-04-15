@@ -19,5 +19,5 @@ typedef struct {
 } influx_upload_metrics_t;
 
 esp_err_t influx_upload_start(app_state_t *state, const influx_config_t *config);
-esp_err_t influx_upload_log_event(const char *event, const char *status, const char *message);
+esp_err_t influx_upload_enqueue_event(const char *event, const char *status, const char *message);
 void influx_upload_get_metrics(influx_upload_metrics_t *metrics);

@@ -14,6 +14,8 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "mbedtls/sha256.h"
 #include "nvs.h"
 
@@ -35,6 +37,7 @@
 #define CONTROL_RESTART_NONCE_MAX_LEN 96
 #define CONTROL_SHA256_HEX_LEN 64
 #define CONTROL_OTA_BUFFER_SIZE 4096
+#define CONTROL_TASK_STACK_SIZE 12288
 
 #define CONTROL_NAMESPACE "control"
 #define CONTROL_LAST_RESTART_NONCE_KEY "last_restart"
@@ -48,6 +51,7 @@ typedef struct {
     char manifest_url[CONTROL_MANIFEST_URL_MAX_LEN];
     char auth_header[CONTROL_TOKEN_MAX_LEN + 16];
     char last_restart_nonce[CONTROL_RESTART_NONCE_MAX_LEN];
+    app_state_t *state;
 } control_state_t;
 
 typedef struct {
@@ -277,7 +281,7 @@ static esp_err_t perform_ota(const control_manifest_t *manifest)
         return ESP_ERR_NOT_FOUND;
     }
 
-    influx_upload_log_event("ota_started", "info", manifest->firmware_version);
+    influx_upload_enqueue_event("ota_started", "info", manifest->firmware_version);
 
     client = esp_http_client_init(&config);
     if (client == NULL) {
@@ -340,7 +344,7 @@ static esp_err_t perform_ota(const control_manifest_t *manifest)
         goto cleanup;
     }
 
-    influx_upload_log_event("ota_applied", "info", manifest->firmware_version);
+    influx_upload_enqueue_event("ota_applied", "info", manifest->firmware_version);
     esp_http_client_cleanup(client);
     mbedtls_sha256_free(&sha_ctx);
     esp_restart();
@@ -353,16 +357,84 @@ cleanup:
     if (client != NULL) {
         esp_http_client_cleanup(client);
     }
-    influx_upload_log_event("ota_failed", "error", esp_err_to_name(err));
+    influx_upload_enqueue_event("ota_failed", "error", esp_err_to_name(err));
     mbedtls_sha256_free(&sha_ctx);
     return err;
 }
 
-esp_err_t control_init(const influx_config_t *influx_config,
+static esp_err_t poll_once(uint32_t now_ms)
+{
+    control_manifest_t manifest;
+    esp_err_t err;
+
+    if (now_ms < s_control.next_poll_ms) {
+        return ESP_OK;
+    }
+
+    err = fetch_manifest(&manifest);
+    if (err != ESP_OK) {
+        s_control.next_poll_ms = now_ms + CONTROL_RETRY_INTERVAL_MS;
+        ESP_LOGW(TAG, "Manifest fetch failed: %s", esp_err_to_name(err));
+        influx_upload_enqueue_event("manifest_fetch_failed", "error", esp_err_to_name(err));
+        return err;
+    }
+
+    s_control.poll_interval_s = manifest.poll_interval_s;
+    s_control.next_poll_ms = now_ms + (manifest.poll_interval_s * 1000U);
+    influx_upload_enqueue_event("manifest_fetch_ok", "info", NULL);
+
+    if (manifest.has_firmware
+        && (strcmp(manifest.firmware_version, s_control.current_version) != 0)) {
+        ESP_LOGI(TAG,
+                 "Applying OTA update %s -> %s",
+                 s_control.current_version,
+                 manifest.firmware_version);
+        influx_upload_enqueue_event("ota_available", "info", manifest.firmware_version);
+        return perform_ota(&manifest);
+    }
+
+    if ((manifest.restart_nonce[0] != '\0')
+        && (strcmp(manifest.restart_nonce, s_control.last_restart_nonce) != 0)) {
+        err = save_last_restart_nonce(manifest.restart_nonce);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to save restart nonce: %s", esp_err_to_name(err));
+            return err;
+        }
+
+        influx_upload_enqueue_event("restart_requested", "info", manifest.restart_nonce);
+        esp_restart();
+    }
+
+    return ESP_OK;
+}
+
+static void control_task(void *arg)
+{
+    (void) arg;
+
+    while (true) {
+        EventBits_t bits = xEventGroupGetBits(s_control.state->state_event_group);
+        bool eth_connected = (bits & ETH_CONNECTED_BIT) != 0;
+
+        if (!eth_connected || !s_control.state->time_synced) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+
+        (void) poll_once(esp_log_timestamp());
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+esp_err_t control_init(app_state_t *state,
+                       const influx_config_t *influx_config,
                        const control_config_t *control_config,
                        const char *current_version)
 {
-    if ((influx_config == NULL) || (control_config == NULL) || (current_version == NULL)) {
+    BaseType_t task_created;
+
+    if ((state == NULL) || (influx_config == NULL) || (control_config == NULL)
+        || (current_version == NULL)) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -400,58 +472,20 @@ esp_err_t control_init(const influx_config_t *influx_config,
         s_control.last_restart_nonce[0] = '\0';
     }
 
+    s_control.state = state;
     s_control.initialized = true;
     s_control.next_poll_ms = 0;
-    influx_upload_log_event("control_ready", "info", s_control.node);
-    return ESP_OK;
-}
-
-esp_err_t control_poll(uint32_t now_ms)
-{
-    control_manifest_t manifest;
-    esp_err_t err;
-
-    if (!s_control.initialized) {
-        return ESP_ERR_INVALID_STATE;
+    task_created = xTaskCreate(control_task,
+                               "control",
+                               CONTROL_TASK_STACK_SIZE,
+                               NULL,
+                               4,
+                               NULL);
+    if (task_created != pdPASS) {
+        memset(&s_control, 0, sizeof(s_control));
+        return ESP_ERR_NO_MEM;
     }
 
-    if (now_ms < s_control.next_poll_ms) {
-        return ESP_OK;
-    }
-
-    err = fetch_manifest(&manifest);
-    if (err != ESP_OK) {
-        s_control.next_poll_ms = now_ms + CONTROL_RETRY_INTERVAL_MS;
-        ESP_LOGW(TAG, "Manifest fetch failed: %s", esp_err_to_name(err));
-        influx_upload_log_event("manifest_fetch_failed", "error", esp_err_to_name(err));
-        return err;
-    }
-
-    s_control.poll_interval_s = manifest.poll_interval_s;
-    s_control.next_poll_ms = now_ms + (manifest.poll_interval_s * 1000U);
-    influx_upload_log_event("manifest_fetch_ok", "info", NULL);
-
-    if (manifest.has_firmware
-        && (strcmp(manifest.firmware_version, s_control.current_version) != 0)) {
-        ESP_LOGI(TAG,
-                 "Applying OTA update %s -> %s",
-                 s_control.current_version,
-                 manifest.firmware_version);
-        influx_upload_log_event("ota_available", "info", manifest.firmware_version);
-        return perform_ota(&manifest);
-    }
-
-    if ((manifest.restart_nonce[0] != '\0')
-        && (strcmp(manifest.restart_nonce, s_control.last_restart_nonce) != 0)) {
-        err = save_last_restart_nonce(manifest.restart_nonce);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to save restart nonce: %s", esp_err_to_name(err));
-            return err;
-        }
-
-        influx_upload_log_event("restart_requested", "info", manifest.restart_nonce);
-        esp_restart();
-    }
-
+    influx_upload_enqueue_event("control_ready", "info", s_control.node);
     return ESP_OK;
 }

@@ -8,6 +8,7 @@
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
 
 #include "adv_buffer.h"
@@ -23,6 +24,17 @@
 #define RESPONSE_BUFFER_SIZE 256
 #define UPLOADER_TASK_STACK_SIZE 8192
 #define MAX_CONSECUTIVE_SENDS 16
+#define EVENT_QUEUE_LENGTH 16
+#define EVENT_NAME_MAX_LEN 32
+#define EVENT_STATUS_MAX_LEN 16
+#define EVENT_MESSAGE_MAX_LEN 128
+
+typedef struct {
+    char event[EVENT_NAME_MAX_LEN];
+    char status[EVENT_STATUS_MAX_LEN];
+    char message[EVENT_MESSAGE_MAX_LEN];
+    uint64_t timestamp_us;
+} device_log_event_t;
 
 typedef struct {
     app_state_t *state;
@@ -34,6 +46,7 @@ typedef struct {
     size_t retry_count;
     influx_upload_metrics_t metrics;
     esp_http_client_handle_t client;
+    QueueHandle_t event_queue;
     bool started;
 } influx_upload_state_t;
 
@@ -229,6 +242,86 @@ static esp_err_t send_batch(const influx_config_t *config,
     return err;
 }
 
+static size_t build_event_line_protocol(const influx_config_t *config,
+                                       const device_log_event_t *event,
+                                       char *body,
+                                       size_t body_size)
+{
+    char escaped_node[(INFLUX_NODE_MAX_LEN * 2) + 1];
+    char escaped_event[(EVENT_NAME_MAX_LEN * 2) + 1];
+    char escaped_status[(EVENT_STATUS_MAX_LEN * 2) + 1];
+    char escaped_message[(EVENT_MESSAGE_MAX_LEN * 2) + 1];
+    int written;
+
+    escape_tag_value(config->node, escaped_node, sizeof(escaped_node));
+    escape_tag_value(event->event, escaped_event, sizeof(escaped_event));
+    escape_tag_value(event->status, escaped_status, sizeof(escaped_status));
+    escape_field_string(event->message, escaped_message, sizeof(escaped_message));
+
+    written = snprintf(body,
+                       body_size,
+                       "device_logs,node=%s,event=%s,status=%s message=\"%s\" %llu",
+                       escaped_node,
+                       escaped_event,
+                       escaped_status,
+                       escaped_message,
+                       (unsigned long long) event->timestamp_us);
+    if ((written < 0) || ((size_t) written >= body_size)) {
+        return 0;
+    }
+
+    return (size_t) written;
+}
+
+static esp_err_t send_body(const char *body, size_t body_len, int *http_status_out)
+{
+    esp_err_t err;
+    char response[RESPONSE_BUFFER_SIZE] = { 0 };
+    int read_len;
+
+    err = ensure_http_client();
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    esp_http_client_set_post_field(s_uploader.client, body, (int) body_len);
+
+    err = esp_http_client_perform(s_uploader.client);
+    if (err == ESP_OK) {
+        *http_status_out = esp_http_client_get_status_code(s_uploader.client);
+        if ((*http_status_out < 200) || (*http_status_out >= 300)) {
+            read_len = esp_http_client_read_response(
+                s_uploader.client, response, sizeof(response) - 1);
+            if (read_len > 0) {
+                response[read_len] = '\0';
+                ESP_LOGW(TAG, "Influx write failed: status=%d body=%s", *http_status_out, response);
+            }
+            err = ESP_FAIL;
+            reset_http_client();
+        }
+    } else {
+        *http_status_out = -1;
+        ESP_LOGW(TAG, "Influx HTTP request failed: %s", esp_err_to_name(err));
+        reset_http_client();
+    }
+
+    return err;
+}
+
+static esp_err_t send_event(const influx_config_t *config,
+                            const device_log_event_t *event,
+                            int *http_status_out)
+{
+    char body[(MAX_LINE_LENGTH * 3) + 128];
+    size_t body_len = build_event_line_protocol(config, event, body, sizeof(body));
+
+    if (body_len == 0) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    return send_body(body, body_len, http_status_out);
+}
+
 static void uploader_task(void *arg)
 {
     uint32_t last_rotate_ms = esp_log_timestamp();
@@ -241,6 +334,7 @@ static void uploader_task(void *arg)
         int http_status = -1;
         esp_err_t err;
         uint32_t now_ms;
+        device_log_event_t event;
 
         if ((xEventGroupGetBits(s_uploader.state->state_event_group) & ETH_CONNECTED_BIT) == 0) {
             vTaskDelay(pdMS_TO_TICKS(UPLOAD_INTERVAL_MS));
@@ -250,6 +344,17 @@ static void uploader_task(void *arg)
         if (!s_uploader.state->time_synced) {
             vTaskDelay(pdMS_TO_TICKS(UPLOAD_INTERVAL_MS));
             continue;
+        }
+
+        while (xQueueReceive(s_uploader.event_queue, &event, 0) == pdTRUE) {
+            err = send_event(&s_uploader.config, &event, &http_status);
+            s_uploader.metrics.requests_sent++;
+            s_uploader.metrics.last_http_status = http_status;
+            if (err == ESP_OK) {
+                s_uploader.metrics.upload_successes++;
+            } else {
+                s_uploader.metrics.upload_failures++;
+            }
         }
 
         now_ms = esp_log_timestamp();
@@ -332,6 +437,11 @@ esp_err_t influx_upload_start(app_state_t *state, const influx_config_t *config)
         return ESP_ERR_INVALID_SIZE;
     }
 
+    s_uploader.event_queue = xQueueCreate(EVENT_QUEUE_LENGTH, sizeof(device_log_event_t));
+    if (s_uploader.event_queue == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
     snprintf(s_uploader.auth_header,
              sizeof(s_uploader.auth_header),
              "Bearer %s",
@@ -355,65 +465,43 @@ esp_err_t influx_upload_start(app_state_t *state, const influx_config_t *config)
     return ESP_OK;
 }
 
-esp_err_t influx_upload_log_event(const char *event, const char *status, const char *message)
+esp_err_t influx_upload_enqueue_event(const char *event, const char *status, const char *message)
 {
-    esp_http_client_config_t http_config;
-    esp_http_client_handle_t client;
-    char escaped_node[(INFLUX_NODE_MAX_LEN * 2) + 1];
-    char escaped_event[64];
-    char escaped_status[32];
-    char escaped_message[(MAX_LINE_LENGTH * 2) + 1];
-    char body[(MAX_LINE_LENGTH * 3) + 128];
-    int body_len;
-    int http_status = -1;
-    esp_err_t err;
+    device_log_event_t queued_event;
 
-    if (!s_uploader.started) {
+    if (!s_uploader.started || (s_uploader.event_queue == NULL)) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    escape_tag_value(s_uploader.config.node, escaped_node, sizeof(escaped_node));
-    escape_tag_value(event != NULL ? event : "unknown", escaped_event, sizeof(escaped_event));
-    escape_tag_value(status != NULL ? status : "info", escaped_status, sizeof(escaped_status));
-    escape_field_string(message, escaped_message, sizeof(escaped_message));
-
-    body_len = snprintf(body,
-                        sizeof(body),
-                        "device_logs,node=%s,event=%s,status=%s message=\"%s\" %llu",
-                        escaped_node,
-                        escaped_event,
-                        escaped_status,
-                        escaped_message,
-                        (unsigned long long) time_sync_now_us());
-    if ((body_len < 0) || (body_len >= (int) sizeof(body))) {
+    memset(&queued_event, 0, sizeof(queued_event));
+    if (snprintf(queued_event.event,
+                 sizeof(queued_event.event),
+                 "%s",
+                 event != NULL ? event : "unknown")
+        >= (int) sizeof(queued_event.event)) {
         return ESP_ERR_INVALID_SIZE;
     }
+    if (snprintf(queued_event.status,
+                 sizeof(queued_event.status),
+                 "%s",
+                 status != NULL ? status : "info")
+        >= (int) sizeof(queued_event.status)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    if (snprintf(queued_event.message,
+                 sizeof(queued_event.message),
+                 "%s",
+                 message != NULL ? message : "")
+        >= (int) sizeof(queued_event.message)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    queued_event.timestamp_us = time_sync_now_us();
 
-    memset(&http_config, 0, sizeof(http_config));
-    http_config.url = s_uploader.url;
-    http_config.method = HTTP_METHOD_POST;
-    http_config.timeout_ms = HTTP_TIMEOUT_MS;
-    http_config.crt_bundle_attach = esp_crt_bundle_attach;
-
-    client = esp_http_client_init(&http_config);
-    if (client == NULL) {
+    if (xQueueSend(s_uploader.event_queue, &queued_event, 0) != pdTRUE) {
         return ESP_ERR_NO_MEM;
     }
 
-    esp_http_client_set_header(client, "Authorization", s_uploader.auth_header);
-    esp_http_client_set_header(client, "Content-Type", "text/plain; charset=utf-8");
-    esp_http_client_set_post_field(client, body, body_len);
-
-    err = esp_http_client_perform(client);
-    if (err == ESP_OK) {
-        http_status = esp_http_client_get_status_code(client);
-        if ((http_status < 200) || (http_status >= 300)) {
-            err = ESP_FAIL;
-        }
-    }
-
-    esp_http_client_cleanup(client);
-    return err;
+    return ESP_OK;
 }
 
 void influx_upload_get_metrics(influx_upload_metrics_t *metrics)

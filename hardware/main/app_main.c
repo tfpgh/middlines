@@ -20,9 +20,10 @@
 
 #define TAG "app_main"
 
-#define ADV_BUFFER_CAPACITY 512
+#define ADV_BUFFER_CAPACITY 1024
 #define MAIN_LOOP_INTERVAL_MS 1000
 #define HEARTBEAT_INTERVAL_MS 10000
+#define HEARTBEAT_EVENT_INTERVAL_MS 60000
 #define ETHERNET_IP_TIMEOUT_MS 30000
 #define TIME_SYNC_WAIT_MS 1000
 #define INFLUX_CONFIG_RETRY_MS 60000
@@ -93,6 +94,7 @@ void app_main(void)
     const char *firmware_version = app_desc->version;
     uint32_t heartbeat_counter = 0;
     uint32_t last_heartbeat_ms = 0;
+    uint32_t last_heartbeat_event_ms = 0;
     uint32_t next_eth_attempt_ms = 0;
     uint32_t next_influx_config_attempt_ms = 0;
     uint32_t next_control_config_attempt_ms = 0;
@@ -183,10 +185,10 @@ void app_main(void)
                              "Influx pipeline started for node '%s' and database '%s'",
                              s_influx_config.node,
                              s_influx_config.db);
-                    influx_upload_log_event("boot", "info", firmware_version);
-                    influx_upload_log_event("time_sync_ok", "info", NULL);
+                    influx_upload_enqueue_event("boot", "info", firmware_version);
+                    influx_upload_enqueue_event("time_sync_ok", "info", NULL);
                     if (eth_connected) {
-                        influx_upload_log_event("ethernet_up", "info", NULL);
+                        influx_upload_enqueue_event("ethernet_up", "info", NULL);
                     }
                 } else {
                     next_influx_config_attempt_ms = now_ms + INFLUX_CONFIG_RETRY_MS;
@@ -205,7 +207,7 @@ void app_main(void)
             err = control_config_load(&s_control_config);
             if (err == ESP_OK) {
                 control_config_missing = false;
-                err = control_init(&s_influx_config, &s_control_config, firmware_version);
+                err = control_init(&s_app_state, &s_influx_config, &s_control_config, firmware_version);
                 if (err == ESP_OK) {
                     s_app_state.control_started = true;
                     ESP_LOGI(TAG, "Control plane started for node '%s'", s_influx_config.node);
@@ -222,21 +224,17 @@ void app_main(void)
         }
 
         if (s_app_state.influx_pipeline_started && (eth_connected != prev_eth_connected)) {
-            influx_upload_log_event(eth_connected ? "ethernet_up" : "ethernet_down",
-                                    eth_connected ? "info" : "warn",
-                                    NULL);
+            influx_upload_enqueue_event(eth_connected ? "ethernet_up" : "ethernet_down",
+                                        eth_connected ? "info" : "warn",
+                                        NULL);
         }
         if (s_app_state.influx_pipeline_started && (s_app_state.time_synced != prev_time_synced)) {
-            influx_upload_log_event(s_app_state.time_synced ? "time_sync_ok" : "time_sync_lost",
-                                    s_app_state.time_synced ? "info" : "warn",
-                                    NULL);
+            influx_upload_enqueue_event(s_app_state.time_synced ? "time_sync_ok" : "time_sync_lost",
+                                        s_app_state.time_synced ? "info" : "warn",
+                                        NULL);
         }
         prev_eth_connected = eth_connected;
         prev_time_synced = s_app_state.time_synced;
-
-        if (s_app_state.control_started && eth_connected && s_app_state.time_synced) {
-            (void) control_poll(now_ms);
-        }
 
         if ((now_ms - last_heartbeat_ms) >= HEARTBEAT_INTERVAL_MS) {
             adv_buffer_metrics_t buffer_metrics = { 0 };
@@ -256,6 +254,23 @@ void app_main(void)
             request_delta = upload_metrics.requests_sent - prev_upload_metrics.requests_sent;
             if (request_delta > 0) {
                 avg_points_per_request = uploaded_delta / request_delta;
+            }
+
+            if ((now_ms - last_heartbeat_event_ms) >= HEARTBEAT_EVENT_INTERVAL_MS) {
+                char heartbeat_message[128];
+                int written = snprintf(heartbeat_message,
+                                       sizeof(heartbeat_message),
+                                       "heap=%lu adv=%lu/%lu up=%llu fail=%llu http=%d",
+                                       (unsigned long) esp_get_free_heap_size(),
+                                       (unsigned long) buffer_metrics.count,
+                                       (unsigned long) buffer_metrics.capacity,
+                                       (unsigned long long) upload_metrics.points_uploaded,
+                                       (unsigned long long) upload_metrics.upload_failures,
+                                       upload_metrics.last_http_status);
+                if ((written > 0) && (written < (int) sizeof(heartbeat_message))) {
+                    (void) influx_upload_enqueue_event("heartbeat", "info", heartbeat_message);
+                    last_heartbeat_event_ms = now_ms;
+                }
             }
 
             ESP_LOGW(TAG,
