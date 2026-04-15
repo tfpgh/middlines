@@ -210,30 +210,37 @@ static esp_err_t fetch_manifest(control_manifest_t *manifest)
     esp_http_client_set_header(client, "Authorization", s_control.auth_header);
     esp_http_client_set_header(client, "X-Middlines-Version", s_control.current_version);
 
+    xSemaphoreTake(s_control.state->http_mutex, portMAX_DELAY);
+
     err = esp_http_client_open(client, 0);
     if (err != ESP_OK) {
+        xSemaphoreGive(s_control.state->http_mutex);
         esp_http_client_cleanup(client);
         return err;
     }
 
     content_len = esp_http_client_fetch_headers(client);
     if (content_len < 0) {
+        xSemaphoreGive(s_control.state->http_mutex);
         esp_http_client_cleanup(client);
         return ESP_FAIL;
     }
 
     status_code = esp_http_client_get_status_code(client);
     if (status_code != 200) {
+        xSemaphoreGive(s_control.state->http_mutex);
         esp_http_client_cleanup(client);
         return ESP_FAIL;
     }
 
     if ((content_len > 0) && (content_len >= (int) sizeof(response))) {
+        xSemaphoreGive(s_control.state->http_mutex);
         esp_http_client_cleanup(client);
         return ESP_ERR_INVALID_SIZE;
     }
 
     read_len = esp_http_client_read_response(client, response, sizeof(response) - 1);
+    xSemaphoreGive(s_control.state->http_mutex);
     esp_http_client_cleanup(client);
     if (read_len < 0) {
         return ESP_FAIL;

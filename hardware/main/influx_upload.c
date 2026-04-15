@@ -219,7 +219,10 @@ static esp_err_t send_batch(const influx_config_t *config,
 
     esp_http_client_set_post_field(s_uploader.client, body, (int) body_len);
 
+    xSemaphoreTake(s_uploader.state->http_mutex, portMAX_DELAY);
     err = esp_http_client_perform(s_uploader.client);
+    xSemaphoreGive(s_uploader.state->http_mutex);
+
     if (err == ESP_OK) {
         *http_status_out = esp_http_client_get_status_code(s_uploader.client);
         if ((*http_status_out < 200) || (*http_status_out >= 300)) {
@@ -286,7 +289,10 @@ static esp_err_t send_body(const char *body, size_t body_len, int *http_status_o
 
     esp_http_client_set_post_field(s_uploader.client, body, (int) body_len);
 
+    xSemaphoreTake(s_uploader.state->http_mutex, portMAX_DELAY);
     err = esp_http_client_perform(s_uploader.client);
+    xSemaphoreGive(s_uploader.state->http_mutex);
+
     if (err == ESP_OK) {
         *http_status_out = esp_http_client_get_status_code(s_uploader.client);
         if ((*http_status_out < 200) || (*http_status_out >= 300)) {

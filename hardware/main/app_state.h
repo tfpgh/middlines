@@ -7,11 +7,13 @@
 #include "esp_eth_netif_glue.h"
 #include "esp_netif.h"
 #include "freertos/event_groups.h"
+#include "freertos/semphr.h"
 
 #define ETH_CONNECTED_BIT BIT0
 
 typedef struct {
     EventGroupHandle_t state_event_group;
+    SemaphoreHandle_t  http_mutex;
     esp_netif_t *eth_netif;
     esp_eth_netif_glue_handle_t eth_glue;
     esp_eth_handle_t eth_handle;

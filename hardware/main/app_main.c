@@ -160,6 +160,14 @@ void app_main(void)
         }
     }
 
+    s_app_state.http_mutex = xSemaphoreCreateMutex();
+    if (s_app_state.http_mutex == NULL) {
+        ESP_LOGE(TAG, "Failed to create HTTP mutex");
+        while (true) {
+            vTaskDelay(pdMS_TO_TICKS(PROVISIONING_RETRY_MS));
+        }
+    }
+
     err = time_sync_init_once();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize time sync: %s", esp_err_to_name(err));
