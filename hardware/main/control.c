@@ -27,7 +27,7 @@
 #define CONTROL_MANIFEST_MAX_LEN 4096
 #define CONTROL_HTTP_TIMEOUT_MS 10000
 #define CONTROL_RETRY_INTERVAL_MS 60000
-#define CONTROL_DEFAULT_POLL_INTERVAL_S 300
+#define CONTROL_DEFAULT_POLL_INTERVAL_S 60
 #define CONTROL_MIN_POLL_INTERVAL_S 30
 #define CONTROL_MAX_POLL_INTERVAL_S 3600
 #define CONTROL_EVENT_TEXT_MAX_LEN 160
@@ -386,11 +386,11 @@ static esp_err_t poll_once(uint32_t now_ms)
     if (manifest.has_firmware
         && (strcmp(manifest.firmware_version, s_control.current_version) != 0)) {
         ESP_LOGI(TAG,
-                 "Applying OTA update %s -> %s",
+                 "OTA update available %s -> %s, restarting to apply before BLE",
                  s_control.current_version,
                  manifest.firmware_version);
-        influx_upload_enqueue_event("ota_available", "info", manifest.firmware_version);
-        return perform_ota(&manifest);
+        influx_upload_enqueue_event("ota_restart", "info", manifest.firmware_version);
+        esp_restart();
     }
 
     if ((manifest.restart_nonce[0] != '\0')

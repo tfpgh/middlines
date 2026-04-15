@@ -180,7 +180,12 @@ void app_main(void)
             if (err == ESP_OK) {
                 err = influx_config_load(&s_influx_config);
                 if (err == ESP_OK) {
-                    control_check_ota_once(&s_influx_config, &s_control_config, firmware_version);
+                    err = control_check_ota_once(&s_influx_config, &s_control_config, firmware_version);
+                    if (err != ESP_OK) {
+                        ESP_LOGW(TAG,
+                                 "Pre-BLE OTA check failed (%s), continuing to BLE start",
+                                 esp_err_to_name(err));
+                    }
                 }
             }
             ota_checked = true;
