@@ -4,51 +4,31 @@ Real-time dining hall line tracking for Middlebury College.
 
 ## Architecture
 ```
-┌────────────┐ ┌────────────┐ ┌────────────┐ ┌────────────┐
-│   ESP32    │ │   ESP32    │ │   ESP32    │ │ Simulator  │
-│   (Ross)   │ │ (Atwater)  │ │ (Proctor)  │ │            │
-└─────┬──────┘ └─────┬──────┘ └─────┬──────┘ └─────┬──────┘
-      │              │              │              │
-      │       MQTT: middlines/{location}/count     │
+┌────────────┐ ┌────────────┐ ┌────────────┐
+│   ESP32    │ │   ESP32    │ │   ESP32    │
+│   (ross)   │ │ (atwater)  │ │ (proctor)  │
+└─────┬──────┘ └─────┬──────┘ └─────┬──────┘
+      │              │              │
+      │  HTTPS poll: /api/node/{node}/manifest
+      │  HTTPS write: Influx device_logs + advertisements
       └──────────────────────┬─────────────────────┘
                              ▼
                   ┌────────────────────┐
-                  │  Mosquitto (MQTT)  │
-                  │       :1883        │
-                  └─────────┬──────────┘
-                            │ subscribe
-                            ▼
-                  ┌────────────────────┐
-                  │ Ingester (Python)  │
-                  └─────────┬──────────┘
-                            │ write
-                            ▼
-                  ┌────────────────────┐
-                  │       SQLite       │
-                  │  ┌──────────────┐  │
-                  │  │ Counts Table │  │
-                  │  └──────────────┘  │
-                  │  ┌──────────────┐  │
-                  │  │ Smoothed View│  │
-                  │  └──────────────┘  │
-                  └─────────┬──────────┘
-                            │ read
-                            ▼
-                  ┌────────────────────┐
                   │      FastAPI       │
-                  │       :8000        │
+                  │  node control UI   │
+                  │  OTA upload/store  │
                   └─────────┬──────────┘
                             │ /api/*
-                            ▼
-                  ┌────────────────────┐
-                  │       Nginx        │
-                  │        :80         │
-                  └─────────┬──────────┘
-                            │
-                            ▼
-                  ┌────────────────────┐
-                  │   React Frontend   │
-                  └────────────────────┘
+            ┌───────────────┴───────────────┐
+            ▼                               ▼
+   ┌────────────────────┐         ┌────────────────────┐
+   │   React Frontend   │         │      InfluxDB      │
+   │ current public app │         │  ops + adv ingest  │
+   └────────────────────┘         └────────────────────┘
+
+Legacy development path still present during the data-plane migration:
+
+ESP32/Simulator -> MQTT -> Ingester -> SQLite -> FastAPI `/api/current`
 ```
 
 ## Development Setup
@@ -67,6 +47,7 @@ If you want it to run in the background, add the `-d` flag.
 
 - Frontend: http://localhost:80
 - API: http://localhost:80/api (proxied through Nginx)
+- Admin: http://localhost:80/api/admin
 - MQTT: localhost:1883
 
 ## Testing MQTT
@@ -98,6 +79,23 @@ docker exec mosquitto mosquitto_pub -t "middlines/ross/count" -m "42"
   - Max counts (99th percentile, baseline-adjusted)
   - Time averages by day/time bucket for "vs typical"
 - Returns busyness percentage, trend, and vs-typical comparison
+- Hosts the node control plane:
+  - `/api/node/{node}/manifest`
+  - `/api/node/artifacts/{filename}`
+  - `/api/admin` for OTA uploads, restart requests, and node token management
+
+## Hardware Provisioning
+
+The hardware now uses two NVS namespaces:
+
+- `influx`
+  - `node`
+  - `url`
+  - `db`
+  - `token`
+- `control`
+  - `url` - base FastAPI URL, for example `https://middlines.com/api`
+  - `token` - bearer token assigned per node from `/api/admin`
 
 ## Project Structure
 ```

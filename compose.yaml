@@ -57,6 +57,9 @@ services:
       - ./data:/data
     environment:
       <<: *shared-environment
+      MIDDLINES_ADMIN_USERNAME: ${MIDDLINES_ADMIN_USERNAME:-admin}
+      MIDDLINES_ADMIN_PASSWORD: ${MIDDLINES_ADMIN_PASSWORD:-changeme}
+      MIDDLINES_SESSION_SECRET: ${MIDDLINES_SESSION_SECRET:-dev-session-secret}
 
   influxdb:
     image: influxdb:3-core
@@ -115,4 +118,3 @@ services:
         condition: service_started
     environment:
       <<: *shared-environment
-

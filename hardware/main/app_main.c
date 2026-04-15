@@ -5,19 +5,17 @@
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "golioth/log.h"
-#include "nvs.h"
 
 #include "adv_buffer.h"
 #include "app_state.h"
 #include "ble_scan.h"
-#include "cloud.h"
+#include "control.h"
+#include "control_config.h"
 #include "ethernet.h"
-#include "fw_update.h"
 #include "influx_config.h"
 #include "influx_upload.h"
 #include "ota_boot.h"
-#include "provisioning.h"
+#include "storage.h"
 #include "time_sync.h"
 
 #define TAG "app_main"
@@ -26,21 +24,21 @@
 #define MAIN_LOOP_INTERVAL_MS 1000
 #define HEARTBEAT_INTERVAL_MS 10000
 #define ETHERNET_IP_TIMEOUT_MS 30000
-#define GOLIOTH_CONNECT_TIMEOUT_MS 30000
 #define TIME_SYNC_WAIT_MS 1000
 #define INFLUX_CONFIG_RETRY_MS 60000
+#define CONTROL_CONFIG_RETRY_MS 60000
 #define RETRY_BACKOFF_INITIAL_MS 5000
 #define RETRY_BACKOFF_MAX_MS 60000
 #define PROVISIONING_RETRY_MS 60000
-#define GOLIOTH_METRICS_LOG_INTERVAL_MS 600000
 #define OTA_BOOT_CONFIRM_DELAY_MS 5000
 
 static app_state_t s_app_state;
 static influx_config_t s_influx_config;
+static control_config_t s_control_config;
 
 static void log_heap_snapshot(const char *context)
 {
-    ESP_LOGI(TAG,
+    ESP_LOGW(TAG,
              "Heap %s: free=%lu largest=%lu min=%lu",
              context,
              (unsigned long) esp_get_free_heap_size(),
@@ -58,15 +56,11 @@ static esp_err_t start_influx_pipeline(app_state_t *state, const influx_config_t
         return ESP_ERR_NO_MEM;
     }
 
-    log_heap_snapshot("after adv buffer init");
-
     err = ble_scan_start();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start BLE scan: %s", esp_err_to_name(err));
         return err;
     }
-
-    log_heap_snapshot("after BLE start");
 
     err = influx_upload_start(state, config);
     if (err != ESP_OK) {
@@ -74,41 +68,9 @@ static esp_err_t start_influx_pipeline(app_state_t *state, const influx_config_t
         return err;
     }
 
-    log_heap_snapshot("after uploader start");
-
     state->influx_pipeline_started = true;
+    log_heap_snapshot("after uploader start");
     return ESP_OK;
-}
-
-static void maybe_log_metrics_to_golioth(app_state_t *state,
-                                         uint32_t now_ms,
-                                         uint32_t *last_metrics_log_ms)
-{
-    adv_buffer_metrics_t buffer_metrics = { 0 };
-    influx_upload_metrics_t upload_metrics = { 0 };
-    char message[256];
-
-    if (((xEventGroupGetBits(state->state_event_group) & GOLIOTH_CONNECTED_BIT) == 0)
-        || ((now_ms - *last_metrics_log_ms) < GOLIOTH_METRICS_LOG_INTERVAL_MS)) {
-        return;
-    }
-
-    adv_buffer_get_metrics(&buffer_metrics);
-    influx_upload_get_metrics(&upload_metrics);
-
-    snprintf(message,
-             sizeof(message),
-             "adv seen=%llu queued=%lu dropped=%llu high=%lu uploaded=%llu fails=%llu http=%d",
-             (unsigned long long) buffer_metrics.packets_seen,
-             (unsigned long) buffer_metrics.count,
-             (unsigned long long) buffer_metrics.packets_dropped,
-             (unsigned long) buffer_metrics.high_watermark,
-             (unsigned long long) upload_metrics.points_uploaded,
-             (unsigned long long) upload_metrics.upload_failures,
-             upload_metrics.last_http_status);
-
-    (void) golioth_log_info(state->golioth_client, TAG, message, NULL, NULL);
-    *last_metrics_log_ms = now_ms;
 }
 
 static uint32_t next_backoff_delay(uint32_t current_delay)
@@ -132,14 +94,13 @@ void app_main(void)
     uint32_t heartbeat_counter = 0;
     uint32_t last_heartbeat_ms = 0;
     uint32_t next_eth_attempt_ms = 0;
-    uint32_t next_golioth_attempt_ms = 0;
     uint32_t next_influx_config_attempt_ms = 0;
+    uint32_t next_control_config_attempt_ms = 0;
     uint32_t eth_backoff_ms = 0;
-    uint32_t golioth_backoff_ms = 0;
-    uint32_t provisioning_backoff_ms = 0;
-    uint32_t last_metrics_log_ms = 0;
-    bool credentials_missing = false;
     bool influx_config_missing = false;
+    bool control_config_missing = false;
+    bool prev_eth_connected = false;
+    bool prev_time_synced = false;
     adv_buffer_metrics_t prev_buffer_metrics = { 0 };
     influx_upload_metrics_t prev_upload_metrics = { 0 };
     esp_err_t err;
@@ -153,8 +114,6 @@ void app_main(void)
             vTaskDelay(pdMS_TO_TICKS(PROVISIONING_RETRY_MS));
         }
     }
-
-    log_heap_snapshot("after NVS init");
 
     err = ethernet_init_once(&s_app_state);
     if (err != ESP_OK) {
@@ -172,16 +131,12 @@ void app_main(void)
         }
     }
     s_app_state.time_sync_initialized = true;
-
-    log_heap_snapshot("after platform init");
-
     detect_pending_ota_state(&s_app_state);
 
     while (true) {
         uint32_t now_ms = esp_log_timestamp();
         EventBits_t bits = xEventGroupGetBits(s_app_state.state_event_group);
         bool eth_connected = (bits & ETH_CONNECTED_BIT) != 0;
-        bool golioth_connected = (bits & GOLIOTH_CONNECTED_BIT) != 0;
 
         confirm_ota_boot_if_healthy(&s_app_state, now_ms, OTA_BOOT_CONFIRM_DELAY_MS);
 
@@ -203,19 +158,17 @@ void app_main(void)
                 ESP_LOGW(TAG,
                          "Ethernet bring-up failed, retry in %lu ms",
                          (unsigned long) eth_backoff_ms);
-                golioth_client_cleanup(&s_app_state);
             }
         }
 
         bits = xEventGroupGetBits(s_app_state.state_event_group);
         eth_connected = (bits & ETH_CONNECTED_BIT) != 0;
-        golioth_connected = (bits & GOLIOTH_CONNECTED_BIT) != 0;
 
         if (eth_connected && !s_app_state.time_synced) {
             err = time_sync_wait_for_valid(TIME_SYNC_WAIT_MS);
             if (err == ESP_OK) {
                 s_app_state.time_synced = true;
-                ESP_LOGI(TAG, "System time synchronized; uploader timestamps are now UTC epoch microseconds");
+                ESP_LOGI(TAG, "System time synchronized");
             }
         }
 
@@ -230,11 +183,13 @@ void app_main(void)
                              "Influx pipeline started for node '%s' and database '%s'",
                              s_influx_config.node,
                              s_influx_config.db);
+                    influx_upload_log_event("boot", "info", firmware_version);
+                    influx_upload_log_event("time_sync_ok", "info", NULL);
+                    if (eth_connected) {
+                        influx_upload_log_event("ethernet_up", "info", NULL);
+                    }
                 } else {
                     next_influx_config_attempt_ms = now_ms + INFLUX_CONFIG_RETRY_MS;
-                    ESP_LOGW(TAG,
-                             "Influx pipeline startup failed, retry in %lu ms",
-                             (unsigned long) INFLUX_CONFIG_RETRY_MS);
                 }
             } else {
                 influx_config_missing = true;
@@ -245,43 +200,43 @@ void app_main(void)
             }
         }
 
-        if (!eth_connected) {
-            if (s_app_state.golioth_client != NULL) {
-                GLTH_LOGW(TAG, "Dropping Golioth client until Ethernet recovers");
-                golioth_client_cleanup(&s_app_state);
-                s_app_state.ota_started = false;
-            }
-        } else if (!golioth_connected && (now_ms >= next_golioth_attempt_ms)) {
-            err = golioth_connect(&s_app_state, GOLIOTH_CONNECT_TIMEOUT_MS);
+        if (s_app_state.influx_pipeline_started && !s_app_state.control_started
+            && (now_ms >= next_control_config_attempt_ms)) {
+            err = control_config_load(&s_control_config);
             if (err == ESP_OK) {
-                golioth_backoff_ms = 0;
-                provisioning_backoff_ms = 0;
-                credentials_missing = false;
-                next_golioth_attempt_ms = now_ms;
-
-                if (!s_app_state.ota_started) {
-                    golioth_fw_update_init(s_app_state.golioth_client, firmware_version);
-                    s_app_state.ota_started = true;
+                control_config_missing = false;
+                err = control_init(&s_influx_config, &s_control_config, firmware_version);
+                if (err == ESP_OK) {
+                    s_app_state.control_started = true;
+                    ESP_LOGI(TAG, "Control plane started for node '%s'", s_influx_config.node);
+                } else {
+                    next_control_config_attempt_ms = now_ms + CONTROL_CONFIG_RETRY_MS;
                 }
             } else {
-                if ((err == ESP_ERR_NVS_NOT_FOUND) || (err == ESP_ERR_INVALID_STATE)) {
-                    credentials_missing = true;
-                    provisioning_backoff_ms = PROVISIONING_RETRY_MS;
-                    next_golioth_attempt_ms = now_ms + provisioning_backoff_ms;
-                    ESP_LOGW(TAG,
-                             "Waiting for valid Golioth credentials, retry in %lu ms",
-                             (unsigned long) provisioning_backoff_ms);
-                } else {
-                    golioth_backoff_ms = next_backoff_delay(golioth_backoff_ms);
-                    next_golioth_attempt_ms = now_ms + golioth_backoff_ms;
-                    GLTH_LOGW(TAG,
-                               "Golioth connect failed, retry in %lu ms",
-                               (unsigned long) golioth_backoff_ms);
-                }
+                control_config_missing = true;
+                next_control_config_attempt_ms = now_ms + CONTROL_CONFIG_RETRY_MS;
+                ESP_LOGW(TAG,
+                         "Waiting for valid control config, retry in %lu ms",
+                         (unsigned long) CONTROL_CONFIG_RETRY_MS);
             }
         }
 
-        maybe_log_metrics_to_golioth(&s_app_state, now_ms, &last_metrics_log_ms);
+        if (s_app_state.influx_pipeline_started && (eth_connected != prev_eth_connected)) {
+            influx_upload_log_event(eth_connected ? "ethernet_up" : "ethernet_down",
+                                    eth_connected ? "info" : "warn",
+                                    NULL);
+        }
+        if (s_app_state.influx_pipeline_started && (s_app_state.time_synced != prev_time_synced)) {
+            influx_upload_log_event(s_app_state.time_synced ? "time_sync_ok" : "time_sync_lost",
+                                    s_app_state.time_synced ? "info" : "warn",
+                                    NULL);
+        }
+        prev_eth_connected = eth_connected;
+        prev_time_synced = s_app_state.time_synced;
+
+        if (s_app_state.control_started && eth_connected && s_app_state.time_synced) {
+            (void) control_poll(now_ms);
+        }
 
         if ((now_ms - last_heartbeat_ms) >= HEARTBEAT_INTERVAL_MS) {
             adv_buffer_metrics_t buffer_metrics = { 0 };
@@ -303,15 +258,14 @@ void app_main(void)
                 avg_points_per_request = uploaded_delta / request_delta;
             }
 
-            ESP_LOGI(TAG,
-                     "Heartbeat #%lu, heap=%lu, eth=%s, golioth=%s, ota=%s%s%s, time=%s, adv=%llu/%lu drop=%llu, up=%llu fail=%llu, rate seen=%llus up=%llus drop=%llus req=%llus avg=%llu, flush=%llu maxburst=%lu http=%d",
+            ESP_LOGW(TAG,
+                     "Heartbeat #%lu, heap=%lu, eth=%s, control=%s%s%s, time=%s, adv=%llu/%lu drop=%llu, up=%llu fail=%llu, rate seen=%llus up=%llus drop=%llus req=%llus avg=%llu, flush=%llu maxburst=%lu http=%d",
                      (unsigned long) heartbeat_counter,
                      (unsigned long) esp_get_free_heap_size(),
                      eth_connected ? "up" : "down",
-                     golioth_connected ? "connected" : "disconnected",
-                     s_app_state.ota_started ? "ready" : "waiting",
-                     credentials_missing ? ", golioth-unprovisioned" : "",
+                     s_app_state.control_started ? "ready" : "waiting",
                      influx_config_missing ? ", influx-unprovisioned" : "",
+                     control_config_missing ? ", control-unprovisioned" : "",
                      s_app_state.time_synced ? "synced" : "waiting",
                      (unsigned long long) buffer_metrics.packets_seen,
                      (unsigned long) buffer_metrics.count,

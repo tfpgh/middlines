@@ -26,7 +26,7 @@ static int gap_event(struct ble_gap_event *event, void *arg);
 
 static void log_heap_snapshot(const char *context)
 {
-    ESP_LOGI(TAG,
+    ESP_LOGW(TAG,
              "Heap %s: free=%lu largest=%lu min=%lu",
              context,
              (unsigned long) esp_get_free_heap_size(),

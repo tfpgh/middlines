@@ -12,11 +12,12 @@
 
 #include "adv_buffer.h"
 #include "influx_upload.h"
+#include "time_sync.h"
 
 #define TAG "influx_upload"
 
 #define UPLOAD_INTERVAL_MS 1000
-#define MAX_BATCH_POINTS 128
+#define MAX_BATCH_POINTS 64
 #define MAX_LINE_LENGTH 128
 #define HTTP_TIMEOUT_MS 10000
 #define RESPONSE_BUFFER_SIZE 256
@@ -40,7 +41,7 @@ static influx_upload_state_t s_uploader;
 
 static void log_heap_snapshot(const char *context)
 {
-    ESP_LOGI(TAG,
+    ESP_LOGW(TAG,
              "Heap %s: free=%lu largest=%lu min=%lu",
              context,
              (unsigned long) esp_get_free_heap_size(),
@@ -56,6 +57,34 @@ static void escape_tag_value(const char *input, char *output, size_t output_size
         if ((*input == ',') || (*input == ' ') || (*input == '=')) {
             output[out_idx++] = '\\';
         }
+        output[out_idx++] = *input++;
+    }
+
+    output[out_idx] = '\0';
+}
+
+static void escape_field_string(const char *input, char *output, size_t output_size)
+{
+    size_t out_idx = 0;
+
+    if (input == NULL) {
+        output[0] = '\0';
+        return;
+    }
+
+    while ((*input != '\0') && (out_idx + 2 < output_size)) {
+        if ((*input == '\\') || (*input == '"')) {
+            output[out_idx++] = '\\';
+            output[out_idx++] = *input++;
+            continue;
+        }
+
+        if ((*input == '\n') || (*input == '\r')) {
+            output[out_idx++] = ' ';
+            input++;
+            continue;
+        }
+
         output[out_idx++] = *input++;
     }
 
@@ -324,6 +353,67 @@ esp_err_t influx_upload_start(app_state_t *state, const influx_config_t *config)
     s_uploader.started = true;
     log_heap_snapshot("after uploader task create");
     return ESP_OK;
+}
+
+esp_err_t influx_upload_log_event(const char *event, const char *status, const char *message)
+{
+    esp_http_client_config_t http_config;
+    esp_http_client_handle_t client;
+    char escaped_node[(INFLUX_NODE_MAX_LEN * 2) + 1];
+    char escaped_event[64];
+    char escaped_status[32];
+    char escaped_message[(MAX_LINE_LENGTH * 2) + 1];
+    char body[(MAX_LINE_LENGTH * 3) + 128];
+    int body_len;
+    int http_status = -1;
+    esp_err_t err;
+
+    if (!s_uploader.started) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    escape_tag_value(s_uploader.config.node, escaped_node, sizeof(escaped_node));
+    escape_tag_value(event != NULL ? event : "unknown", escaped_event, sizeof(escaped_event));
+    escape_tag_value(status != NULL ? status : "info", escaped_status, sizeof(escaped_status));
+    escape_field_string(message, escaped_message, sizeof(escaped_message));
+
+    body_len = snprintf(body,
+                        sizeof(body),
+                        "device_logs,node=%s,event=%s,status=%s message=\"%s\" %llu",
+                        escaped_node,
+                        escaped_event,
+                        escaped_status,
+                        escaped_message,
+                        (unsigned long long) time_sync_now_us());
+    if ((body_len < 0) || (body_len >= (int) sizeof(body))) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    memset(&http_config, 0, sizeof(http_config));
+    http_config.url = s_uploader.url;
+    http_config.method = HTTP_METHOD_POST;
+    http_config.timeout_ms = HTTP_TIMEOUT_MS;
+    http_config.crt_bundle_attach = esp_crt_bundle_attach;
+
+    client = esp_http_client_init(&http_config);
+    if (client == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_http_client_set_header(client, "Authorization", s_uploader.auth_header);
+    esp_http_client_set_header(client, "Content-Type", "text/plain; charset=utf-8");
+    esp_http_client_set_post_field(client, body, body_len);
+
+    err = esp_http_client_perform(client);
+    if (err == ESP_OK) {
+        http_status = esp_http_client_get_status_code(client);
+        if ((http_status < 200) || (http_status >= 300)) {
+            err = ESP_FAIL;
+        }
+    }
+
+    esp_http_client_cleanup(client);
+    return err;
 }
 
 void influx_upload_get_metrics(influx_upload_metrics_t *metrics)
