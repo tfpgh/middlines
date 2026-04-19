@@ -62,16 +62,25 @@ services:
       MIDDLINES_SESSION_SECRET: ${MIDDLINES_SESSION_SECRET:-dev-session-secret}
 
   influxdb:
-    image: influxdb:3-core
+    image: influxdb:3-enterprise
     restart: unless-stopped
-    command: ["serve", "--node-id", "middlines"]
+    command:
+      - serve
+      - --node-id=middlines
+      - --cluster-id=middlines-cluster
+      - --object-store=file
+      - --data-dir=/home/influxdb3/.influxdb
+      - --license-email=${INFLUXDB3_LICENSE_EMAIL}
+      - --license-type=home
     environment:
       <<: *shared-environment
       INFLUXDB3_AUTH_TOKEN: ${INFLUXDB3_AUTH_TOKEN}
+      INFLUXDB3_ENTERPRISE_LICENSE_EMAIL: ${INFLUXDB3_LICENSE_EMAIL}
     volumes:
       - ./data/influxdb:/home/influxdb3/.influxdb
     healthcheck:
-      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8181' 2>/dev/null"]
+      test:
+        ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8181' 2>/dev/null"]
       interval: 10s
       timeout: 5s
       retries: 5
