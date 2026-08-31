@@ -1,9 +1,7 @@
 #include <ctype.h>
-#include <inttypes.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 #include "cJSON.h"
@@ -27,11 +25,8 @@
 #define CONTROL_MANIFEST_MAX_LEN 4096
 #define CONTROL_HTTP_TIMEOUT_MS 10000
 #define CONTROL_RETRY_INTERVAL_MS 60000
-#define CONTROL_DEFAULT_POLL_INTERVAL_S 60
 #define CONTROL_MIN_POLL_INTERVAL_S 30
 #define CONTROL_MAX_POLL_INTERVAL_S 3600
-#define CONTROL_EVENT_TEXT_MAX_LEN 160
-#define CONTROL_NODE_MAX_LEN 64
 #define CONTROL_VERSION_MAX_LEN 64
 #define CONTROL_MANIFEST_URL_MAX_LEN 384
 #define CONTROL_RESTART_NONCE_MAX_LEN 96
@@ -43,10 +38,8 @@
 #define CONTROL_LAST_RESTART_NONCE_KEY "last_restart"
 
 typedef struct {
-    bool initialized;
+    bool ota_failure_reported;
     uint32_t next_poll_ms;
-    uint32_t poll_interval_s;
-    char node[CONTROL_NODE_MAX_LEN];
     char current_version[CONTROL_VERSION_MAX_LEN];
     char manifest_url[CONTROL_MANIFEST_URL_MAX_LEN];
     char auth_header[CONTROL_TOKEN_MAX_LEN + 16];
@@ -64,6 +57,12 @@ typedef struct {
 } control_manifest_t;
 
 static control_state_t s_control;
+static char s_preboot_ota_attempted_version[CONTROL_VERSION_MAX_LEN];
+
+static bool deadline_reached(uint32_t now_ms, uint32_t deadline_ms)
+{
+    return (int32_t) (now_ms - deadline_ms) >= 0;
+}
 
 static void clamp_poll_interval(control_manifest_t *manifest)
 {
@@ -123,9 +122,12 @@ static esp_err_t save_last_restart_nonce(const char *nonce)
     return err;
 }
 
-static esp_err_t read_json_string(cJSON *obj, const char *key, char *buffer, size_t buffer_size)
+static esp_err_t read_json_string(const cJSON *obj,
+                                  const char *key,
+                                  char *buffer,
+                                  size_t buffer_size)
 {
-    cJSON *item = cJSON_GetObjectItemCaseSensitive(obj, key);
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(obj, key);
 
     if (!cJSON_IsString(item) || (item->valuestring == NULL) || (item->valuestring[0] == '\0')) {
         return ESP_FAIL;
@@ -141,8 +143,8 @@ static esp_err_t read_json_string(cJSON *obj, const char *key, char *buffer, siz
 static esp_err_t parse_manifest(const char *payload, control_manifest_t *manifest)
 {
     cJSON *root;
-    cJSON *firmware;
-    cJSON *poll_interval;
+    const cJSON *firmware;
+    const cJSON *poll_interval;
 
     memset(manifest, 0, sizeof(*manifest));
     manifest->poll_interval_s = CONTROL_MIN_POLL_INTERVAL_S;
@@ -198,10 +200,10 @@ static esp_err_t fetch_manifest(control_manifest_t *manifest)
     };
     char response[CONTROL_MANIFEST_MAX_LEN];
     esp_http_client_handle_t client = esp_http_client_init(&config);
-    int status_code;
     int content_len;
     int read_len;
     esp_err_t err;
+    bool mutex_locked = false;
 
     if (client == NULL) {
         return ESP_ERR_NO_MEM;
@@ -212,53 +214,48 @@ static esp_err_t fetch_manifest(control_manifest_t *manifest)
 
     if (s_control.state != NULL) {
         xSemaphoreTake(s_control.state->http_mutex, portMAX_DELAY);
+        mutex_locked = true;
     }
 
     err = esp_http_client_open(client, 0);
     if (err != ESP_OK) {
-        if (s_control.state != NULL) {
-            xSemaphoreGive(s_control.state->http_mutex);
-        }
-        esp_http_client_cleanup(client);
-        return err;
+        goto cleanup;
     }
 
     content_len = esp_http_client_fetch_headers(client);
     if (content_len < 0) {
-        if (s_control.state != NULL) {
-            xSemaphoreGive(s_control.state->http_mutex);
-        }
-        esp_http_client_cleanup(client);
-        return ESP_FAIL;
+        err = ESP_FAIL;
+        goto cleanup;
     }
 
-    status_code = esp_http_client_get_status_code(client);
-    if (status_code != 200) {
-        if (s_control.state != NULL) {
-            xSemaphoreGive(s_control.state->http_mutex);
-        }
-        esp_http_client_cleanup(client);
-        return ESP_FAIL;
+    if (esp_http_client_get_status_code(client) != 200) {
+        err = ESP_FAIL;
+        goto cleanup;
     }
 
     if ((content_len > 0) && (content_len >= (int) sizeof(response))) {
-        if (s_control.state != NULL) {
-            xSemaphoreGive(s_control.state->http_mutex);
-        }
-        esp_http_client_cleanup(client);
-        return ESP_ERR_INVALID_SIZE;
+        err = ESP_ERR_INVALID_SIZE;
+        goto cleanup;
     }
 
     read_len = esp_http_client_read_response(client, response, sizeof(response) - 1);
-    if (s_control.state != NULL) {
-        xSemaphoreGive(s_control.state->http_mutex);
-    }
-    esp_http_client_cleanup(client);
     if (read_len < 0) {
-        return ESP_FAIL;
+        err = ESP_FAIL;
+        goto cleanup;
     }
 
     response[read_len] = '\0';
+    err = ESP_OK;
+
+cleanup:
+    if (mutex_locked) {
+        xSemaphoreGive(s_control.state->http_mutex);
+    }
+    esp_http_client_cleanup(client);
+    if (err != ESP_OK) {
+        return err;
+    }
+
     return parse_manifest(response, manifest);
 }
 
@@ -300,11 +297,14 @@ static esp_err_t perform_ota(const control_manifest_t *manifest)
         return ESP_ERR_NOT_FOUND;
     }
 
+    mbedtls_sha256_init(&sha_ctx);
+
     influx_upload_enqueue_event("ota_started", "info", manifest->firmware_version);
 
     client = esp_http_client_init(&config);
     if (client == NULL) {
-        return ESP_ERR_NO_MEM;
+        err = ESP_ERR_NO_MEM;
+        goto cleanup;
     }
 
     err = esp_http_client_open(client, 0);
@@ -327,7 +327,6 @@ static esp_err_t perform_ota(const control_manifest_t *manifest)
         goto cleanup;
     }
 
-    mbedtls_sha256_init(&sha_ctx);
     mbedtls_sha256_starts(&sha_ctx, 0);
 
     while ((read_len = esp_http_client_read(client, (char *) buffer, sizeof(buffer))) > 0) {
@@ -386,7 +385,7 @@ static esp_err_t poll_once(uint32_t now_ms)
     control_manifest_t manifest;
     esp_err_t err;
 
-    if (now_ms < s_control.next_poll_ms) {
+    if (!deadline_reached(now_ms, s_control.next_poll_ms)) {
         return ESP_OK;
     }
 
@@ -398,18 +397,27 @@ static esp_err_t poll_once(uint32_t now_ms)
         return err;
     }
 
-    s_control.poll_interval_s = manifest.poll_interval_s;
     s_control.next_poll_ms = now_ms + (manifest.poll_interval_s * 1000U);
     influx_upload_enqueue_event("manifest_fetch_ok", "info", NULL);
 
     if (manifest.has_firmware
         && (strcmp(manifest.firmware_version, s_control.current_version) != 0)) {
-        ESP_LOGI(TAG,
-                 "OTA update available %s -> %s, restarting to apply before BLE",
-                 s_control.current_version,
-                 manifest.firmware_version);
-        influx_upload_enqueue_event("ota_restart", "info", manifest.firmware_version);
-        esp_restart();
+        if (strcmp(manifest.firmware_version, s_preboot_ota_attempted_version) == 0) {
+            if (!s_control.ota_failure_reported) {
+                ESP_LOGW(TAG,
+                         "OTA %s already failed during this boot; continuing current firmware",
+                         manifest.firmware_version);
+                influx_upload_enqueue_event("ota_deferred", "warn", manifest.firmware_version);
+                s_control.ota_failure_reported = true;
+            }
+        } else {
+            ESP_LOGI(TAG,
+                     "OTA update available %s -> %s, restarting to apply before BLE",
+                     s_control.current_version,
+                     manifest.firmware_version);
+            influx_upload_enqueue_event("ota_restart", "info", manifest.firmware_version);
+            esp_restart();
+        }
     }
 
     if ((manifest.restart_nonce[0] != '\0')
@@ -445,19 +453,15 @@ static void control_task(void *arg)
     }
 }
 
-esp_err_t control_check_ota_once(const influx_config_t *influx_config,
-                                 const control_config_t *control_config,
-                                 const char *current_version)
+static esp_err_t configure_control(const influx_config_t *influx_config,
+                                   const control_config_t *control_config,
+                                   const char *current_version)
 {
-    control_manifest_t manifest;
-    esp_err_t err;
-
     if ((influx_config == NULL) || (control_config == NULL) || (current_version == NULL)) {
         return ESP_ERR_INVALID_ARG;
     }
 
     memset(&s_control, 0, sizeof(s_control));
-
     if (snprintf(s_control.current_version,
                  sizeof(s_control.current_version),
                  "%s",
@@ -479,6 +483,21 @@ esp_err_t control_check_ota_once(const influx_config_t *influx_config,
                  control_config->token)
         >= (int) sizeof(s_control.auth_header)) {
         return ESP_ERR_INVALID_SIZE;
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t control_check_ota_once(const influx_config_t *influx_config,
+                                 const control_config_t *control_config,
+                                 const char *current_version)
+{
+    control_manifest_t manifest;
+    esp_err_t err;
+
+    err = configure_control(influx_config, control_config, current_version);
+    if (err != ESP_OK) {
+        return err;
     }
 
     ESP_LOGI(TAG, "Pre-BLE OTA check, current version: %s", current_version);
@@ -495,6 +514,10 @@ esp_err_t control_check_ota_once(const influx_config_t *influx_config,
                  "Pre-BLE OTA update available %s -> %s, applying",
                  s_control.current_version,
                  manifest.firmware_version);
+        snprintf(s_preboot_ota_attempted_version,
+                 sizeof(s_preboot_ota_attempted_version),
+                 "%s",
+                 manifest.firmware_version);
         return perform_ota(&manifest);
     }
 
@@ -509,40 +532,15 @@ esp_err_t control_init(app_state_t *state,
                        const char *current_version)
 {
     BaseType_t task_created;
+    esp_err_t err;
 
-    if ((state == NULL) || (influx_config == NULL) || (control_config == NULL)
-        || (current_version == NULL)) {
+    if (state == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    memset(&s_control, 0, sizeof(s_control));
-    s_control.poll_interval_s = CONTROL_DEFAULT_POLL_INTERVAL_S;
-
-    if (snprintf(s_control.node, sizeof(s_control.node), "%s", influx_config->node)
-        >= (int) sizeof(s_control.node)) {
-        return ESP_ERR_INVALID_SIZE;
-    }
-    if (snprintf(s_control.current_version,
-                 sizeof(s_control.current_version),
-                 "%s",
-                 current_version)
-        >= (int) sizeof(s_control.current_version)) {
-        return ESP_ERR_INVALID_SIZE;
-    }
-    if (snprintf(s_control.manifest_url,
-                 sizeof(s_control.manifest_url),
-                 "%s/node/%s/manifest",
-                 control_config->url,
-                 influx_config->node)
-        >= (int) sizeof(s_control.manifest_url)) {
-        return ESP_ERR_INVALID_SIZE;
-    }
-    if (snprintf(s_control.auth_header,
-                 sizeof(s_control.auth_header),
-                 "Bearer %s",
-                 control_config->token)
-        >= (int) sizeof(s_control.auth_header)) {
-        return ESP_ERR_INVALID_SIZE;
+    err = configure_control(influx_config, control_config, current_version);
+    if (err != ESP_OK) {
+        return err;
     }
 
     if (load_last_restart_nonce() != ESP_OK) {
@@ -550,7 +548,6 @@ esp_err_t control_init(app_state_t *state,
     }
 
     s_control.state = state;
-    s_control.initialized = true;
     s_control.next_poll_ms = 0;
     task_created = xTaskCreate(control_task,
                                "control",
@@ -563,6 +560,6 @@ esp_err_t control_init(app_state_t *state,
         return ESP_ERR_NO_MEM;
     }
 
-    influx_upload_enqueue_event("control_ready", "info", s_control.node);
+    influx_upload_enqueue_event("control_ready", "info", influx_config->node);
     return ESP_OK;
 }

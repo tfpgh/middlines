@@ -6,13 +6,9 @@
 #include "adv_buffer.h"
 
 typedef struct {
-    bool occupied;
-    advertisement_t adv;
-} adv_slot_t;
-
-typedef struct {
-    adv_slot_t *active_slots;
-    adv_slot_t *flush_slots;
+    /* Valid advertisements always have a nonzero timestamp, so zero marks an empty slot. */
+    advertisement_t *active_slots;
+    advertisement_t *flush_slots;
     size_t capacity;
     size_t active_count;
     size_t flush_count;
@@ -37,13 +33,16 @@ bool adv_buffer_init(size_t capacity)
     if (adv_buffer_is_initialized()) {
         return true;
     }
+    if (capacity == 0) {
+        return false;
+    }
 
-    s_buffer.active_slots = calloc(capacity, sizeof(adv_slot_t));
+    s_buffer.active_slots = calloc(capacity, sizeof(advertisement_t));
     if (s_buffer.active_slots == NULL) {
         return false;
     }
 
-    s_buffer.flush_slots = calloc(capacity, sizeof(adv_slot_t));
+    s_buffer.flush_slots = calloc(capacity, sizeof(advertisement_t));
     if (s_buffer.flush_slots == NULL) {
         free(s_buffer.active_slots);
         s_buffer.active_slots = NULL;
@@ -78,17 +77,16 @@ bool adv_buffer_push(const advertisement_t *adv)
     start_idx = hash_mac(adv->mac, s_buffer.capacity);
     for (size_t i = 0; i < s_buffer.capacity; i++) {
         size_t idx = (start_idx + i) % s_buffer.capacity;
-        adv_slot_t *slot = &s_buffer.active_slots[idx];
+        advertisement_t *slot = &s_buffer.active_slots[idx];
 
-        if (slot->occupied && (slot->adv.mac == adv->mac)) {
-            slot->adv = *adv;
+        if ((slot->timestamp_us != 0) && (slot->mac == adv->mac)) {
+            *slot = *adv;
             stored = true;
             break;
         }
 
-        if (!slot->occupied) {
-            slot->occupied = true;
-            slot->adv = *adv;
+        if (slot->timestamp_us == 0) {
+            *slot = *adv;
             s_buffer.active_count++;
             s_buffer.packets_enqueued++;
             if ((s_buffer.active_count + s_buffer.flush_count) > s_buffer.high_watermark) {
@@ -109,7 +107,7 @@ bool adv_buffer_push(const advertisement_t *adv)
 
 bool adv_buffer_rotate_window(void)
 {
-    adv_slot_t *tmp_slots;
+    advertisement_t *tmp_slots;
     bool rotated = false;
 
     if (!adv_buffer_is_initialized()) {
@@ -141,14 +139,13 @@ size_t adv_buffer_drain(advertisement_t *out, size_t max_items)
 
     portENTER_CRITICAL(&s_buffer.lock);
     for (size_t i = 0; (i < s_buffer.capacity) && (drained < max_items) && (s_buffer.flush_count > 0); i++) {
-        adv_slot_t *slot = &s_buffer.flush_slots[i];
-        if (!slot->occupied) {
+        advertisement_t *slot = &s_buffer.flush_slots[i];
+        if (slot->timestamp_us == 0) {
             continue;
         }
 
-        out[drained] = slot->adv;
-        slot->occupied = false;
-        memset(&slot->adv, 0, sizeof(slot->adv));
+        out[drained] = *slot;
+        memset(slot, 0, sizeof(*slot));
         s_buffer.flush_count--;
         drained++;
     }

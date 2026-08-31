@@ -131,85 +131,68 @@ esp_err_t ethernet_init_once(app_state_t *state)
     return ESP_OK;
 }
 
-void ethernet_cleanup(app_state_t *state)
+esp_err_t ethernet_cleanup(app_state_t *state)
 {
-    xEventGroupClearBits(state->state_event_group, ETH_CONNECTED_BIT);
+    esp_err_t err;
+
+    if (state == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (state->state_event_group != NULL) {
+        xEventGroupClearBits(state->state_event_group, ETH_CONNECTED_BIT);
+    }
 
     if (state->eth_handle != NULL) {
-        esp_eth_stop(state->eth_handle);
+        err = esp_eth_stop(state->eth_handle);
+        if ((err != ESP_OK) && (err != ESP_ERR_INVALID_STATE)) {
+            ESP_LOGW(TAG, "Ethernet stop failed during cleanup: %s", esp_err_to_name(err));
+        }
     }
 
     if (state->eth_glue != NULL) {
-        esp_eth_del_netif_glue(state->eth_glue);
+        err = esp_eth_del_netif_glue(state->eth_glue);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to delete Ethernet netif glue: %s", esp_err_to_name(err));
+            return err;
+        }
         state->eth_glue = NULL;
     }
 
     if (state->eth_handle != NULL) {
-        esp_eth_driver_uninstall(state->eth_handle);
+        err = esp_eth_driver_uninstall(state->eth_handle);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to uninstall Ethernet driver: %s", esp_err_to_name(err));
+            return err;
+        }
         state->eth_handle = NULL;
     }
+
+    /* The driver deinitializes these instances but does not own their allocations. */
+    if (state->eth_mac != NULL) {
+        err = state->eth_mac->del(state->eth_mac);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to delete Ethernet MAC: %s", esp_err_to_name(err));
+            return err;
+        }
+        state->eth_mac = NULL;
+    }
+
+    if (state->eth_phy != NULL) {
+        err = state->eth_phy->del(state->eth_phy);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to delete Ethernet PHY: %s", esp_err_to_name(err));
+            return err;
+        }
+        state->eth_phy = NULL;
+    }
+
+    return ESP_OK;
 }
 
-esp_err_t ethernet_connect(app_state_t *state, uint32_t timeout_ms)
+static esp_err_t wait_for_ip(app_state_t *state, uint32_t timeout_ms)
 {
-    eth_mac_config_t mac_config = ETH_MAC_DEFAULT_CONFIG();
-    eth_phy_config_t phy_config = ETH_PHY_DEFAULT_CONFIG();
-    eth_esp32_emac_config_t emac_config = ETH_ESP32_EMAC_DEFAULT_CONFIG();
-    esp_eth_mac_t *mac;
-    esp_eth_phy_t *phy;
     EventBits_t bits;
-    esp_err_t err;
-
-    ethernet_cleanup(state);
-    power_on_ethernet_phy();
-
-    ESP_LOGI(TAG, "Starting Ethernet for Olimex ESP32-POE");
-
-    emac_config.smi_gpio.mdc_num = OLIMEX_ETH_MDC_GPIO;
-    emac_config.smi_gpio.mdio_num = OLIMEX_ETH_MDIO_GPIO;
-    emac_config.clock_config.rmii.clock_mode = EMAC_CLK_OUT;
-    emac_config.clock_config.rmii.clock_gpio = OLIMEX_ETH_CLK_GPIO;
-    mac_config.sw_reset_timeout_ms = 1000;
-    mac = esp_eth_mac_new_esp32(&emac_config, &mac_config);
-    if (mac == NULL) {
-        return ESP_ERR_NO_MEM;
-    }
-
-    phy_config.phy_addr = OLIMEX_ETH_PHY_ADDR;
-    phy_config.reset_gpio_num = OLIMEX_ETH_PHY_RESET_GPIO;
-    phy_config.reset_timeout_ms = 1000;
-    phy = esp_eth_phy_new_lan87xx(&phy_config);
-    if (phy == NULL) {
-        return ESP_ERR_NO_MEM;
-    }
-
-    err = esp_eth_driver_install(&(esp_eth_config_t) ETH_DEFAULT_CONFIG(mac, phy), &state->eth_handle);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Ethernet driver install failed: %s", esp_err_to_name(err));
-        ethernet_cleanup(state);
-        return err;
-    }
-
-    state->eth_glue = esp_eth_new_netif_glue(state->eth_handle);
-    if (state->eth_glue == NULL) {
-        ESP_LOGE(TAG, "Failed to create Ethernet netif glue");
-        ethernet_cleanup(state);
-        return ESP_ERR_NO_MEM;
-    }
-
-    err = esp_netif_attach(state->eth_netif, state->eth_glue);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to attach Ethernet netif: %s", esp_err_to_name(err));
-        ethernet_cleanup(state);
-        return err;
-    }
-
-    err = esp_eth_start(state->eth_handle);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Ethernet start failed: %s", esp_err_to_name(err));
-        ethernet_cleanup(state);
-        return err;
-    }
 
     ESP_LOGI(TAG, "Waiting for Ethernet IP...");
     bits = xEventGroupWaitBits(state->state_event_group,
@@ -219,9 +202,84 @@ esp_err_t ethernet_connect(app_state_t *state, uint32_t timeout_ms)
                                pdMS_TO_TICKS(timeout_ms));
     if ((bits & ETH_CONNECTED_BIT) == 0) {
         ESP_LOGW(TAG, "Timed out waiting for Ethernet IP after %lu ms", (unsigned long) timeout_ms);
-        ethernet_cleanup(state);
         return ESP_ERR_TIMEOUT;
     }
 
     return ESP_OK;
+}
+
+esp_err_t ethernet_connect(app_state_t *state, uint32_t timeout_ms)
+{
+    eth_mac_config_t mac_config = ETH_MAC_DEFAULT_CONFIG();
+    eth_phy_config_t phy_config = ETH_PHY_DEFAULT_CONFIG();
+    eth_esp32_emac_config_t emac_config = ETH_ESP32_EMAC_DEFAULT_CONFIG();
+    esp_err_t err;
+
+    if (state == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* A running driver monitors the PHY and DHCP will recover without reconstruction. */
+    if (state->eth_handle != NULL) {
+        return wait_for_ip(state, timeout_ms);
+    }
+
+    err = ethernet_cleanup(state);
+    if (err != ESP_OK) {
+        return err;
+    }
+    power_on_ethernet_phy();
+
+    ESP_LOGI(TAG, "Starting Ethernet for Olimex ESP32-POE");
+
+    emac_config.smi_gpio.mdc_num = OLIMEX_ETH_MDC_GPIO;
+    emac_config.smi_gpio.mdio_num = OLIMEX_ETH_MDIO_GPIO;
+    emac_config.clock_config.rmii.clock_mode = EMAC_CLK_OUT;
+    emac_config.clock_config.rmii.clock_gpio = OLIMEX_ETH_CLK_GPIO;
+    mac_config.sw_reset_timeout_ms = 1000;
+    state->eth_mac = esp_eth_mac_new_esp32(&emac_config, &mac_config);
+    if (state->eth_mac == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    phy_config.phy_addr = OLIMEX_ETH_PHY_ADDR;
+    phy_config.reset_gpio_num = OLIMEX_ETH_PHY_RESET_GPIO;
+    phy_config.reset_timeout_ms = 1000;
+    state->eth_phy = esp_eth_phy_new_lan87xx(&phy_config);
+    if (state->eth_phy == NULL) {
+        (void) ethernet_cleanup(state);
+        return ESP_ERR_NO_MEM;
+    }
+
+    err = esp_eth_driver_install(
+        &(esp_eth_config_t) ETH_DEFAULT_CONFIG(state->eth_mac, state->eth_phy),
+        &state->eth_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Ethernet driver install failed: %s", esp_err_to_name(err));
+        (void) ethernet_cleanup(state);
+        return err;
+    }
+
+    state->eth_glue = esp_eth_new_netif_glue(state->eth_handle);
+    if (state->eth_glue == NULL) {
+        ESP_LOGE(TAG, "Failed to create Ethernet netif glue");
+        (void) ethernet_cleanup(state);
+        return ESP_ERR_NO_MEM;
+    }
+
+    err = esp_netif_attach(state->eth_netif, state->eth_glue);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to attach Ethernet netif: %s", esp_err_to_name(err));
+        (void) ethernet_cleanup(state);
+        return err;
+    }
+
+    err = esp_eth_start(state->eth_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Ethernet start failed: %s", esp_err_to_name(err));
+        (void) ethernet_cleanup(state);
+        return err;
+    }
+
+    return wait_for_ip(state, timeout_ms);
 }

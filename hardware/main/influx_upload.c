@@ -21,6 +21,8 @@
 #define MAX_BATCH_POINTS 64
 #define MAX_LINE_LENGTH 128
 #define HTTP_TIMEOUT_MS 10000
+#define HTTP_RETRY_BACKOFF_INITIAL_MS 1000
+#define HTTP_RETRY_BACKOFF_MAX_MS 60000
 #define RESPONSE_BUFFER_SIZE 256
 #define UPLOADER_TASK_STACK_SIZE 8192
 #define MAX_CONSECUTIVE_SENDS 16
@@ -42,8 +44,7 @@ typedef struct {
     char url[INFLUX_URL_MAX_LEN + INFLUX_DB_MAX_LEN + 96];
     char auth_header[INFLUX_TOKEN_MAX_LEN + 16];
     advertisement_t batch[MAX_BATCH_POINTS];
-    advertisement_t retry_batch[MAX_BATCH_POINTS];
-    size_t retry_count;
+    size_t batch_count;
     influx_upload_metrics_t metrics;
     esp_http_client_handle_t client;
     QueueHandle_t event_queue;
@@ -51,6 +52,19 @@ typedef struct {
 } influx_upload_state_t;
 
 static influx_upload_state_t s_uploader;
+
+static uint32_t next_retry_backoff(uint32_t current_delay_ms)
+{
+    if (current_delay_ms == 0) {
+        return HTTP_RETRY_BACKOFF_INITIAL_MS;
+    }
+
+    if (current_delay_ms >= (HTTP_RETRY_BACKOFF_MAX_MS / 2)) {
+        return HTTP_RETRY_BACKOFF_MAX_MS;
+    }
+
+    return current_delay_ms * 2;
+}
 
 static void log_heap_snapshot(const char *context)
 {
@@ -194,16 +208,16 @@ static size_t build_line_protocol(const influx_config_t *config,
     return offset;
 }
 
+static esp_err_t send_body(const char *body, size_t body_len, int *http_status_out);
+
 static esp_err_t send_batch(const influx_config_t *config,
                             const advertisement_t *batch,
                             size_t count,
                             int *http_status_out)
 {
-    char response[RESPONSE_BUFFER_SIZE] = { 0 };
     char *body = NULL;
     esp_err_t err;
     size_t body_len;
-    int read_len;
 
     body_len = build_line_protocol(config, batch, count, &body);
     if ((body_len == 0) || (body == NULL)) {
@@ -211,36 +225,7 @@ static esp_err_t send_batch(const influx_config_t *config,
         return ESP_ERR_NO_MEM;
     }
 
-    err = ensure_http_client();
-    if (err != ESP_OK) {
-        free(body);
-        return err;
-    }
-
-    esp_http_client_set_post_field(s_uploader.client, body, (int) body_len);
-
-    xSemaphoreTake(s_uploader.state->http_mutex, portMAX_DELAY);
-    err = esp_http_client_perform(s_uploader.client);
-    xSemaphoreGive(s_uploader.state->http_mutex);
-
-    if (err == ESP_OK) {
-        *http_status_out = esp_http_client_get_status_code(s_uploader.client);
-        if ((*http_status_out < 200) || (*http_status_out >= 300)) {
-            read_len = esp_http_client_read_response(
-                s_uploader.client, response, sizeof(response) - 1);
-            if (read_len > 0) {
-                response[read_len] = '\0';
-                ESP_LOGW(TAG, "Influx write failed: status=%d body=%s", *http_status_out, response);
-            }
-            err = ESP_FAIL;
-            reset_http_client();
-        }
-    } else {
-        *http_status_out = -1;
-        ESP_LOGW(TAG, "Influx HTTP request failed: %s", esp_err_to_name(err));
-        reset_http_client();
-    }
-
+    err = send_body(body, body_len, http_status_out);
     free(body);
     return err;
 }
@@ -279,8 +264,6 @@ static size_t build_event_line_protocol(const influx_config_t *config,
 static esp_err_t send_body(const char *body, size_t body_len, int *http_status_out)
 {
     esp_err_t err;
-    char response[RESPONSE_BUFFER_SIZE] = { 0 };
-    int read_len;
 
     err = ensure_http_client();
     if (err != ESP_OK) {
@@ -296,7 +279,8 @@ static esp_err_t send_body(const char *body, size_t body_len, int *http_status_o
     if (err == ESP_OK) {
         *http_status_out = esp_http_client_get_status_code(s_uploader.client);
         if ((*http_status_out < 200) || (*http_status_out >= 300)) {
-            read_len = esp_http_client_read_response(
+            char response[RESPONSE_BUFFER_SIZE] = { 0 };
+            int read_len = esp_http_client_read_response(
                 s_uploader.client, response, sizeof(response) - 1);
             if (read_len > 0) {
                 response[read_len] = '\0';
@@ -331,23 +315,26 @@ static esp_err_t send_event(const influx_config_t *config,
 static void uploader_task(void *arg)
 {
     uint32_t last_rotate_ms = esp_log_timestamp();
+    uint32_t retry_backoff_ms = 0;
 
     (void) arg;
 
     while (true) {
-        size_t batch_count = 0;
         uint32_t consecutive_sends = 0;
         int http_status = -1;
         esp_err_t err;
         uint32_t now_ms;
         device_log_event_t event;
+        bool send_failed = false;
 
         if ((xEventGroupGetBits(s_uploader.state->state_event_group) & ETH_CONNECTED_BIT) == 0) {
+            retry_backoff_ms = 0;
             vTaskDelay(pdMS_TO_TICKS(UPLOAD_INTERVAL_MS));
             continue;
         }
 
         if (!s_uploader.state->time_synced) {
+            retry_backoff_ms = 0;
             vTaskDelay(pdMS_TO_TICKS(UPLOAD_INTERVAL_MS));
             continue;
         }
@@ -364,21 +351,19 @@ static void uploader_task(void *arg)
         }
 
         now_ms = esp_log_timestamp();
-        if ((s_uploader.retry_count == 0) && ((now_ms - last_rotate_ms) >= UPLOAD_INTERVAL_MS)) {
+        if ((s_uploader.batch_count == 0) && ((now_ms - last_rotate_ms) >= UPLOAD_INTERVAL_MS)) {
             if (adv_buffer_rotate_window()) {
                 last_rotate_ms = now_ms;
             }
         }
 
         while (consecutive_sends < MAX_CONSECUTIVE_SENDS) {
-            if (s_uploader.retry_count > 0) {
-                memcpy(s_uploader.batch,
-                       s_uploader.retry_batch,
-                       s_uploader.retry_count * sizeof(s_uploader.batch[0]));
-                batch_count = s_uploader.retry_count;
-            } else {
-                batch_count = adv_buffer_drain(s_uploader.batch, MAX_BATCH_POINTS);
+            size_t batch_count;
+
+            if (s_uploader.batch_count == 0) {
+                s_uploader.batch_count = adv_buffer_drain(s_uploader.batch, MAX_BATCH_POINTS);
             }
+            batch_count = s_uploader.batch_count;
 
             if (batch_count == 0) {
                 break;
@@ -396,13 +381,12 @@ static void uploader_task(void *arg)
             if (err == ESP_OK) {
                 s_uploader.metrics.upload_successes++;
                 s_uploader.metrics.points_uploaded += batch_count;
-                s_uploader.retry_count = 0;
+                s_uploader.batch_count = 0;
+                retry_backoff_ms = 0;
             } else {
                 s_uploader.metrics.upload_failures++;
-                memcpy(s_uploader.retry_batch,
-                       s_uploader.batch,
-                       batch_count * sizeof(s_uploader.batch[0]));
-                s_uploader.retry_count = batch_count;
+                retry_backoff_ms = next_retry_backoff(retry_backoff_ms);
+                send_failed = true;
                 break;
             }
 
@@ -412,7 +396,9 @@ static void uploader_task(void *arg)
             }
         }
 
-        if (consecutive_sends == 0) {
+        if (send_failed) {
+            vTaskDelay(pdMS_TO_TICKS(retry_backoff_ms));
+        } else if (consecutive_sends == 0) {
             now_ms = esp_log_timestamp();
             if ((now_ms - last_rotate_ms) < UPLOAD_INTERVAL_MS) {
                 vTaskDelay(pdMS_TO_TICKS(UPLOAD_INTERVAL_MS - (now_ms - last_rotate_ms)));
@@ -463,6 +449,8 @@ esp_err_t influx_upload_start(app_state_t *state, const influx_config_t *config)
                                NULL);
     if (task_created != pdPASS) {
         log_heap_snapshot("uploader task create failed");
+        vQueueDelete(s_uploader.event_queue);
+        s_uploader.event_queue = NULL;
         return ESP_ERR_NO_MEM;
     }
 

@@ -10,6 +10,7 @@
 #include "freertos/semphr.h"
 
 #define ETH_CONNECTED_BIT BIT0
+#define OTA_CHECK_DONE_BIT BIT1
 
 typedef struct {
     EventGroupHandle_t state_event_group;
@@ -17,8 +18,9 @@ typedef struct {
     esp_netif_t *eth_netif;
     esp_eth_netif_glue_handle_t eth_glue;
     esp_eth_handle_t eth_handle;
+    esp_eth_mac_t *eth_mac;
+    esp_eth_phy_t *eth_phy;
     bool platform_initialized;
-    bool time_sync_initialized;
     bool time_sync_started;
     bool time_synced;
     bool ota_pending_verify;

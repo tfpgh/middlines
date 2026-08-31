@@ -4,7 +4,6 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
-#include "nvs_flash.h"
 
 #include "host/ble_hs.h"
 #include "host/util/util.h"
@@ -19,7 +18,6 @@
 #define TAG "ble_scan"
 
 static bool s_started;
-static bool s_scan_active;
 
 void ble_store_config_init(void);
 static int gap_event(struct ble_gap_event *event, void *arg);
@@ -62,11 +60,9 @@ static void start_scan(void)
     rc = ble_gap_disc(own_addr_type, BLE_HS_FOREVER, &disc_params, gap_event, NULL);
     if (rc != 0) {
         ESP_LOGE(TAG, "Failed to start passive scan: rc=%d", rc);
-        s_scan_active = false;
         return;
     }
 
-    s_scan_active = true;
     ESP_LOGI(TAG, "Passive BLE scan started");
 }
 
@@ -88,7 +84,6 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         adv_buffer_push(&adv);
         return 0;
     case BLE_GAP_EVENT_DISC_COMPLETE:
-        s_scan_active = false;
         ESP_LOGW(TAG, "BLE scan completed; restarting");
         start_scan();
         return 0;
@@ -100,7 +95,6 @@ static int gap_event(struct ble_gap_event *event, void *arg)
 static void on_reset(int reason)
 {
     ESP_LOGW(TAG, "NimBLE reset: reason=%d", reason);
-    s_scan_active = false;
 }
 
 static void on_sync(void)
@@ -161,4 +155,14 @@ esp_err_t ble_scan_start(void)
     s_started = true;
     log_heap_snapshot("after NimBLE host task start");
     return ESP_OK;
+}
+
+void ble_scan_ensure_active(void)
+{
+    if (!s_started || !ble_hs_synced() || ble_gap_disc_active()) {
+        return;
+    }
+
+    ESP_LOGW(TAG, "BLE scan is inactive; restarting");
+    start_scan();
 }

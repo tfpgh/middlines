@@ -35,8 +35,6 @@
 #define OTA_CHECK_TASK_STACK_SIZE 20480
 
 static app_state_t s_app_state;
-static influx_config_t s_influx_config;
-static control_config_t s_control_config;
 
 static void log_heap_snapshot(const char *context)
 {
@@ -76,21 +74,23 @@ static esp_err_t start_influx_pipeline(app_state_t *state, const influx_config_t
 }
 
 typedef struct {
-    bool       *done;
+    app_state_t *state;
     const char *firmware_version;
 } ota_check_task_arg_t;
 
 static void ota_check_task(void *arg)
 {
     ota_check_task_arg_t *ctx = (ota_check_task_arg_t *) arg;
+    influx_config_t influx_config;
+    control_config_t control_config;
     esp_err_t err;
 
-    err = control_config_load(&s_control_config);
+    err = control_config_load(&control_config);
     if (err == ESP_OK) {
-        err = influx_config_load(&s_influx_config);
+        err = influx_config_load(&influx_config);
         if (err == ESP_OK) {
-            err = control_check_ota_once(&s_influx_config,
-                                         &s_control_config,
+            err = control_check_ota_once(&influx_config,
+                                         &control_config,
                                          ctx->firmware_version);
             if (err != ESP_OK) {
                 ESP_LOGW(TAG,
@@ -100,7 +100,7 @@ static void ota_check_task(void *arg)
         }
     }
 
-    *ctx->done = true;
+    xEventGroupSetBits(ctx->state->state_event_group, OTA_CHECK_DONE_BIT);
     vTaskDelete(NULL);
 }
 
@@ -118,6 +118,11 @@ static uint32_t next_backoff_delay(uint32_t current_delay)
     return current_delay;
 }
 
+static bool deadline_reached(uint32_t now_ms, uint32_t deadline_ms)
+{
+    return (int32_t) (now_ms - deadline_ms) >= 0;
+}
+
 void app_main(void)
 {
     const esp_app_desc_t *app_desc = esp_app_get_description();
@@ -130,14 +135,15 @@ void app_main(void)
     uint32_t next_control_config_attempt_ms = 0;
     uint32_t eth_backoff_ms = 0;
     bool ota_check_started = false;
-    bool ota_checked = false;
-    static ota_check_task_arg_t ota_arg;
+    ota_check_task_arg_t ota_arg;
     bool influx_config_missing = false;
     bool control_config_missing = false;
     bool prev_eth_connected = false;
     bool prev_time_synced = false;
     adv_buffer_metrics_t prev_buffer_metrics = { 0 };
     influx_upload_metrics_t prev_upload_metrics = { 0 };
+    influx_config_t influx_config;
+    control_config_t control_config;
     esp_err_t err;
 
     esp_log_level_set("esp-x509-crt-bundle", ESP_LOG_WARN);
@@ -175,7 +181,6 @@ void app_main(void)
             vTaskDelay(pdMS_TO_TICKS(PROVISIONING_RETRY_MS));
         }
     }
-    s_app_state.time_sync_initialized = true;
     detect_pending_ota_state(&s_app_state);
 
     while (true) {
@@ -185,18 +190,12 @@ void app_main(void)
 
         confirm_ota_boot_if_healthy(&s_app_state, now_ms, OTA_BOOT_CONFIRM_DELAY_MS);
 
-        if (!eth_connected && (now_ms >= next_eth_attempt_ms)) {
+        if (!eth_connected && deadline_reached(now_ms, next_eth_attempt_ms)) {
             ESP_LOGI(TAG, "Attempting Ethernet bring-up");
             err = ethernet_connect(&s_app_state, ETHERNET_IP_TIMEOUT_MS);
             if (err == ESP_OK) {
                 eth_backoff_ms = 0;
                 next_eth_attempt_ms = now_ms;
-                if (!s_app_state.time_sync_started) {
-                    err = time_sync_start();
-                    if (err == ESP_OK) {
-                        s_app_state.time_sync_started = true;
-                    }
-                }
             } else {
                 eth_backoff_ms = next_backoff_delay(eth_backoff_ms);
                 next_eth_attempt_ms = now_ms + eth_backoff_ms;
@@ -209,6 +208,13 @@ void app_main(void)
         bits = xEventGroupGetBits(s_app_state.state_event_group);
         eth_connected = (bits & ETH_CONNECTED_BIT) != 0;
 
+        if (eth_connected && !s_app_state.time_sync_started) {
+            err = time_sync_start();
+            if (err == ESP_OK) {
+                s_app_state.time_sync_started = true;
+            }
+        }
+
         if (eth_connected && !s_app_state.time_synced) {
             err = time_sync_wait_for_valid(TIME_SYNC_WAIT_MS);
             if (err == ESP_OK) {
@@ -218,7 +224,7 @@ void app_main(void)
         }
 
         if (s_app_state.time_synced && !ota_check_started) {
-            ota_arg.done             = &ota_checked;
+            ota_arg.state            = &s_app_state;
             ota_arg.firmware_version = firmware_version;
             if (xTaskCreate(ota_check_task,
                             "ota_check",
@@ -227,22 +233,24 @@ void app_main(void)
                             4,
                             NULL) != pdPASS) {
                 ESP_LOGE(TAG, "Failed to create OTA check task, skipping");
-                ota_checked = true;
+                xEventGroupSetBits(s_app_state.state_event_group, OTA_CHECK_DONE_BIT);
             }
             ota_check_started = true;
         }
 
-        if (s_app_state.time_synced && ota_checked && !s_app_state.influx_pipeline_started
-            && (now_ms >= next_influx_config_attempt_ms)) {
-            err = influx_config_load(&s_influx_config);
+        bits = xEventGroupGetBits(s_app_state.state_event_group);
+        if (s_app_state.time_synced && ((bits & OTA_CHECK_DONE_BIT) != 0)
+            && !s_app_state.influx_pipeline_started
+            && deadline_reached(now_ms, next_influx_config_attempt_ms)) {
+            err = influx_config_load(&influx_config);
             if (err == ESP_OK) {
                 influx_config_missing = false;
-                err = start_influx_pipeline(&s_app_state, &s_influx_config);
+                err = start_influx_pipeline(&s_app_state, &influx_config);
                 if (err == ESP_OK) {
                     ESP_LOGI(TAG,
                              "Influx pipeline started for node '%s' and database '%s'",
-                             s_influx_config.node,
-                             s_influx_config.db);
+                             influx_config.node,
+                             influx_config.db);
                     influx_upload_enqueue_event("boot", "info", firmware_version);
                     influx_upload_enqueue_event("time_sync_ok", "info", NULL);
                     if (eth_connected) {
@@ -261,14 +269,17 @@ void app_main(void)
         }
 
         if (s_app_state.influx_pipeline_started && !s_app_state.control_started
-            && (now_ms >= next_control_config_attempt_ms)) {
-            err = control_config_load(&s_control_config);
+            && deadline_reached(now_ms, next_control_config_attempt_ms)) {
+            err = control_config_load(&control_config);
             if (err == ESP_OK) {
                 control_config_missing = false;
-                err = control_init(&s_app_state, &s_influx_config, &s_control_config, firmware_version);
+                err = control_init(&s_app_state,
+                                   &influx_config,
+                                   &control_config,
+                                   firmware_version);
                 if (err == ESP_OK) {
                     s_app_state.control_started = true;
-                    ESP_LOGI(TAG, "Control plane started for node '%s'", s_influx_config.node);
+                    ESP_LOGI(TAG, "Control plane started for node '%s'", influx_config.node);
                 } else {
                     next_control_config_attempt_ms = now_ms + CONTROL_CONFIG_RETRY_MS;
                 }
@@ -303,6 +314,10 @@ void app_main(void)
             uint64_t dropped_delta;
             uint64_t request_delta;
             uint64_t avg_points_per_request = 0;
+
+            if (s_app_state.influx_pipeline_started) {
+                ble_scan_ensure_active();
+            }
 
             adv_buffer_get_metrics(&buffer_metrics);
             influx_upload_get_metrics(&upload_metrics);
