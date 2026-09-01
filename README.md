@@ -4,9 +4,6 @@ Real-time dining hall line tracking for Middlebury College.
 
 ## Architecture
 
-The repository is currently between data-plane implementations. The retained
-services provide the web application, node control/OTA, and MQTT broker:
-
 ```
 ┌────────────┐ ┌────────────┐ ┌────────────┐
 │   ESP32    │ │   ESP32    │ │   ESP32    │
@@ -63,9 +60,6 @@ docker exec mosquitto mosquitto_sub -t "middlines/#" -v
 ```
 
 ## Services
-
-**Mosquitto:**
-- MQTT broker retained for the new telemetry data plane
 
 **API:**
 - Hosts the node control plane:
