@@ -25,7 +25,6 @@ typedef struct {
     bool time_synced;
     bool ota_pending_verify;
     bool ota_confirmed;
-    bool influx_pipeline_started;
     bool control_started;
     uint32_t boot_time_ms;
 } app_state_t;

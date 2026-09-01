@@ -4,17 +4,14 @@ import os
 import secrets
 import sqlite3
 from base64 import urlsafe_b64decode, urlsafe_b64encode
-from collections.abc import AsyncIterator, Generator
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from html import escape
 from pathlib import Path
-from time import time
-from typing import Annotated, Literal, cast
-from zoneinfo import ZoneInfo
+from typing import Annotated, cast
 
 from fastapi import (
-    Depends,
     FastAPI,
     File,
     Form,
@@ -26,12 +23,9 @@ from fastapi import (
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from loguru import logger
-from pydantic import BaseModel
 
-DATABASE_PATH = "/data/middlines.db"
 CONTROL_DATABASE_PATH = "/data/device_control.db"
 ARTIFACTS_DIR = Path("/data/ota")
-TIMEZONE = ZoneInfo(os.environ.get("TZ", "America/New_York"))
 
 ADMIN_USERNAME = os.environ.get("MIDDLINES_ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.environ.get("MIDDLINES_ADMIN_PASSWORD", "changeme")
@@ -41,52 +35,6 @@ DEFAULT_NODES = ("ross", "proctor", "atwater")
 DEFAULT_POLL_INTERVAL_S = 300
 SESSION_COOKIE = "middlines_admin"
 PUBLIC_API_PREFIX = "/api"
-
-# Cache TTL in seconds
-CACHE_TTL = 30
-
-# Trend: compare current count to N rows back
-TREND_LOOKBACK_ROWS = 20
-# Trend: percentage change threshold to determine increasing/decreasing
-TREND_THRESHOLD = 0.07
-
-# Aggregation: time bucket size in minutes
-TIME_BUCKET_SIZE = 2
-# Aggregation: days of historical data to consider
-LOOKBACK_DAYS = 45
-# Aggregation: percentile for max count calculation (0.99 = 99th percentile)
-MAX_PERCENTILE = 0.9995
-# Aggregation: multiplier of baseline below which location is considered closed
-CLOSED_THRESHOLD = 1.5
-
-# Trend: minimum busyness percentage to report a trend (below this, trend is None)
-TREND_MIN_BUSYNESS = 10.0
-
-
-class DataPoint(BaseModel):
-    timestamp: datetime
-    busyness_percentage: float | None
-
-
-class LocationStatus(BaseModel):
-    location: str
-    timestamp: datetime
-    busyness_percentage: float | None
-    vs_typical_percentage: float | None
-    trend: Literal["Increasing", "Steady", "Decreasing"] | None
-    today_data: list[DataPoint]
-
-
-class SmoothedCount(BaseModel):
-    location: str
-    timestamp: datetime
-    count: float
-
-
-class LocationAggregates(BaseModel):
-    baseline: float
-    max_count: float
-    time_averages: dict[tuple[bool, int], float]
 
 
 def utc_now() -> str:
@@ -164,165 +112,6 @@ def init_control_db() -> None:
         )
     db.commit()
     db.close()
-
-
-def _compute_aggregates(counts: list[SmoothedCount]) -> dict[str, LocationAggregates]:
-    now = datetime.now(TIMEZONE)
-    yesterday = now - timedelta(days=1)
-    lookback_start = now - timedelta(days=LOOKBACK_DAYS)
-
-    by_location: dict[str, list[SmoothedCount]] = {}
-    for c in counts:
-        by_location.setdefault(c.location, []).append(c)
-
-    result: dict[str, LocationAggregates] = {}
-    for location, location_counts in by_location.items():
-        baseline_counts = [
-            c.count
-            for c in location_counts
-            if c.timestamp > yesterday and c.timestamp.hour in set(range(1, 4))
-        ]
-        baseline = sum(baseline_counts) / len(baseline_counts) if baseline_counts else 0
-
-        open_counts = sorted(
-            c.count
-            for c in location_counts
-            if c.timestamp > lookback_start and c.count > baseline * CLOSED_THRESHOLD
-        )
-        if open_counts:
-            percentile_idx = int(len(open_counts) * MAX_PERCENTILE)
-            percentile_idx = min(percentile_idx, len(open_counts) - 1)
-            max_count = open_counts[percentile_idx] - baseline
-        else:
-            max_count = 0
-
-        time_buckets: dict[tuple[bool, int], list[float]] = {}
-        for c in location_counts:
-            if c.timestamp <= lookback_start:
-                continue
-            if c.count <= baseline * CLOSED_THRESHOLD:
-                continue
-            is_weekend = c.timestamp.weekday() >= 5
-            minutes = (
-                c.timestamp.hour * 60
-                + (c.timestamp.minute // TIME_BUCKET_SIZE) * TIME_BUCKET_SIZE
-            )
-            time_buckets.setdefault((is_weekend, minutes), []).append(c.count)
-
-        result[location] = LocationAggregates(
-            baseline=baseline,
-            max_count=max_count,
-            time_averages={k: sum(v) / len(v) for k, v in time_buckets.items()},
-        )
-
-    return result
-
-
-def _calculate_busyness(
-    count: float | None,
-    baseline: float | None,
-    max_count: float | None,
-) -> float | None:
-    if count is None or baseline is None or max_count is None or max_count <= 0:
-        return None
-    busyness = ((count - baseline) / max_count) * 100
-    return max(0.0, min(100.0, busyness))
-
-
-def _build_location_status(db: sqlite3.Connection) -> list[LocationStatus]:
-    now = datetime.now(TIMEZONE)
-    midnight_today = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    lookback_start = now - timedelta(days=LOOKBACK_DAYS)
-
-    rows = db.execute(
-        """
-        SELECT location, timestamp, smoothed_count
-        FROM smoothed_counts
-        WHERE timestamp >= ?
-        ORDER BY location, timestamp
-        """,
-        (lookback_start.isoformat(sep=" ", timespec="seconds"),),
-    ).fetchall()
-
-    if not rows:
-        raise HTTPException(status_code=503, detail="No data available")
-
-    counts = [
-        SmoothedCount(
-            location=row["location"],
-            timestamp=datetime.fromisoformat(row["timestamp"]),
-            count=row["smoothed_count"],
-        )
-        for row in rows
-    ]
-
-    aggregates = _compute_aggregates(counts)
-    by_location: dict[str, list[SmoothedCount]] = {}
-    for c in counts:
-        by_location.setdefault(c.location, []).append(c)
-
-    results: list[LocationStatus] = []
-    for location, location_counts in sorted(by_location.items()):
-        agg = aggregates.get(location)
-        if not agg:
-            continue
-
-        latest = location_counts[-1]
-        past_count = (
-            location_counts[-1 - TREND_LOOKBACK_ROWS].count
-            if len(location_counts) > TREND_LOOKBACK_ROWS
-            else None
-        )
-        busyness = _calculate_busyness(latest.count, agg.baseline, agg.max_count)
-
-        is_weekend = latest.timestamp.weekday() >= 5
-        minutes = (
-            latest.timestamp.hour * 60
-            + (latest.timestamp.minute // TIME_BUCKET_SIZE) * TIME_BUCKET_SIZE
-        )
-        typical = agg.time_averages.get((is_weekend, minutes))
-        vs_typical = (
-            ((latest.count - typical) / typical) * 100
-            if typical and typical > 0
-            else None
-        )
-
-        trend: Literal["Increasing", "Steady", "Decreasing"] | None = None
-        if (
-            busyness is not None
-            and busyness >= TREND_MIN_BUSYNESS
-            and past_count
-            and past_count > 0
-        ):
-            change = (latest.count - past_count) / past_count
-            if change > TREND_THRESHOLD:
-                trend = "Increasing"
-            elif change < -TREND_THRESHOLD:
-                trend = "Decreasing"
-            else:
-                trend = "Steady"
-
-        results.append(
-            LocationStatus(
-                location=location,
-                timestamp=latest.timestamp,
-                busyness_percentage=busyness,
-                vs_typical_percentage=vs_typical,
-                trend=trend,
-                today_data=[
-                    DataPoint(
-                        timestamp=c.timestamp,
-                        busyness_percentage=_calculate_busyness(
-                            c.count, agg.baseline, agg.max_count
-                        ),
-                    )
-                    for c in location_counts
-                    if c.timestamp >= midnight_today
-                ],
-            )
-        )
-
-    return results
 
 
 def sign_session_value(value: str) -> str:
@@ -495,16 +284,11 @@ def get_node_state(node: str) -> sqlite3.Row | None:
     return row
 
 
-_cache: tuple[float, list[LocationStatus]] | None = None
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     ensure_directories()
     init_control_db()
-    logger.info(
-        f"API starting, database at {DATABASE_PATH}, control db at {CONTROL_DATABASE_PATH}"
-    )
+    logger.info(f"API starting, control db at {CONTROL_DATABASE_PATH}")
     yield
     logger.info("API shutting down")
 
@@ -513,33 +297,9 @@ app = FastAPI(lifespan=lifespan, root_path="/api")
 app.add_middleware(GZipMiddleware)
 
 
-def get_db() -> Generator[sqlite3.Connection]:
-    db = sqlite3.connect(DATABASE_PATH, timeout=5.0)
-    db.row_factory = sqlite3.Row
-    try:
-        yield db
-    finally:
-        db.close()
-
-
 @app.get("/health")
 def health() -> str:
     return "Ok"
-
-
-@app.get("/current")
-def get_current(
-    db: Annotated[sqlite3.Connection, Depends(get_db)],
-) -> list[LocationStatus]:
-    global _cache
-    now = time()
-    if _cache is not None:
-        cached_time, cached_data = _cache
-        if now - cached_time < CACHE_TTL:
-            return cached_data
-    results = _build_location_status(db)
-    _cache = (now, results)
-    return results
 
 
 @app.get("/node/{node}/manifest")

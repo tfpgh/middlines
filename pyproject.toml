@@ -7,7 +7,7 @@ dependencies = []
 
 [tool.uv.workspace]
 members = [
-    "services/*",
+    "services/api",
 ]
 
 [dependency-groups]
@@ -26,6 +26,6 @@ ignore = ["E501"]
 
 [tool.pyright]
 pythonVersion = "3.14"
-typeCheckingMode = "all"
+typeCheckingMode = "strict"
 venvPath = "."
 venv = ".venv"

@@ -12,47 +12,11 @@ services:
     environment:
       <<: *shared-environment
 
-  db-init:
-    build: ./services/db-init
-    volumes:
-      - ./data:/data
-    environment:
-      <<: *shared-environment
-
-  ingester:
-    build: ./services/ingester
-    restart: unless-stopped
-    depends_on:
-      mosquitto:
-        condition: service_started
-      db-init:
-        condition: service_completed_successfully
-    volumes:
-      - ./data:/data
-    environment:
-      <<: *shared-environment
-
-  # simulator:
-  #   build: ./services/simulator
-  #   restart: unless-stopped
-  #   depends_on:
-  #     mosquitto:
-  #       condition: service_started
-  #     db-init:
-  #       condition: service_completed_successfully
-  #   volumes:
-  #     - ./data:/data
-  #   environment:
-  #     <<: *shared-environment
-
   api:
     build: ./services/api
     restart: unless-stopped
     ports:
       - 8000:8000
-    depends_on:
-      db-init:
-        condition: service_completed_successfully
     volumes:
       - ./data:/data
     environment:
@@ -60,52 +24,6 @@ services:
       MIDDLINES_ADMIN_USERNAME: ${MIDDLINES_ADMIN_USERNAME:-admin}
       MIDDLINES_ADMIN_PASSWORD: ${MIDDLINES_ADMIN_PASSWORD:-changeme}
       MIDDLINES_SESSION_SECRET: ${MIDDLINES_SESSION_SECRET:-dev-session-secret}
-
-  influxdb:
-    image: influxdb:3-enterprise
-    restart: unless-stopped
-    command:
-      - serve
-      - --node-id=middlines
-      - --cluster-id=middlines-cluster
-      - --object-store=file
-      - --data-dir=/home/influxdb3/.influxdb
-      - --license-email=${INFLUXDB3_LICENSE_EMAIL}
-      - --license-type=home
-    environment:
-      <<: *shared-environment
-      INFLUXDB3_AUTH_TOKEN: ${INFLUXDB3_AUTH_TOKEN}
-      INFLUXDB3_ENTERPRISE_LICENSE_EMAIL: ${INFLUXDB3_LICENSE_EMAIL}
-    volumes:
-      - ./data/influxdb:/home/influxdb3/.influxdb
-    ulimits:
-      nofile:
-        soft: 65536
-        hard: 524288
-    healthcheck:
-      test:
-        ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8181' 2>/dev/null"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 20s
-
-  influxdb3-ui:
-    image: influxdata/influxdb3-ui
-    restart: unless-stopped
-    command: ["--mode=admin"]
-    environment:
-      <<: *shared-environment
-      SESSION_SECRET_KEY: ${INFLUXDB3_UI_SESSION_SECRET}
-      DEFAULT_INFLUX_SERVER: https://data.middlines.com
-      DEFAULT_API_TOKEN: ${INFLUXDB3_AUTH_TOKEN}
-      DEFAULT_INFLUX_DATABASE: middlines
-      DEFAULT_SERVER_NAME: middlines
-    volumes:
-      - ./data/influxdb3-ui:/db:rw
-    depends_on:
-      influxdb:
-        condition: service_healthy
 
   frontend:
     build: ./frontend
@@ -125,10 +43,6 @@ services:
       - ./nginx-proxy/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx-proxy/certs:/etc/nginx/certs:ro
     depends_on:
-      influxdb:
-        condition: service_healthy
-      influxdb3-ui:
-        condition: service_started
       frontend:
         condition: service_started
     environment:

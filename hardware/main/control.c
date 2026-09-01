@@ -18,7 +18,6 @@
 #include "nvs.h"
 
 #include "control.h"
-#include "influx_upload.h"
 
 #define TAG "control"
 
@@ -299,8 +298,6 @@ static esp_err_t perform_ota(const control_manifest_t *manifest)
 
     mbedtls_sha256_init(&sha_ctx);
 
-    influx_upload_enqueue_event("ota_started", "info", manifest->firmware_version);
-
     client = esp_http_client_init(&config);
     if (client == NULL) {
         err = ESP_ERR_NO_MEM;
@@ -362,7 +359,6 @@ static esp_err_t perform_ota(const control_manifest_t *manifest)
         goto cleanup;
     }
 
-    influx_upload_enqueue_event("ota_applied", "info", manifest->firmware_version);
     esp_http_client_cleanup(client);
     mbedtls_sha256_free(&sha_ctx);
     esp_restart();
@@ -375,7 +371,6 @@ cleanup:
     if (client != NULL) {
         esp_http_client_cleanup(client);
     }
-    influx_upload_enqueue_event("ota_failed", "error", esp_err_to_name(err));
     mbedtls_sha256_free(&sha_ctx);
     return err;
 }
@@ -393,13 +388,10 @@ static esp_err_t poll_once(uint32_t now_ms)
     if (err != ESP_OK) {
         s_control.next_poll_ms = now_ms + CONTROL_RETRY_INTERVAL_MS;
         ESP_LOGW(TAG, "Manifest fetch failed: %s", esp_err_to_name(err));
-        influx_upload_enqueue_event("manifest_fetch_failed", "error", esp_err_to_name(err));
         return err;
     }
 
     s_control.next_poll_ms = now_ms + (manifest.poll_interval_s * 1000U);
-    influx_upload_enqueue_event("manifest_fetch_ok", "info", NULL);
-
     if (manifest.has_firmware
         && (strcmp(manifest.firmware_version, s_control.current_version) != 0)) {
         if (strcmp(manifest.firmware_version, s_preboot_ota_attempted_version) == 0) {
@@ -407,7 +399,6 @@ static esp_err_t poll_once(uint32_t now_ms)
                 ESP_LOGW(TAG,
                          "OTA %s already failed during this boot; continuing current firmware",
                          manifest.firmware_version);
-                influx_upload_enqueue_event("ota_deferred", "warn", manifest.firmware_version);
                 s_control.ota_failure_reported = true;
             }
         } else {
@@ -415,7 +406,6 @@ static esp_err_t poll_once(uint32_t now_ms)
                      "OTA update available %s -> %s, restarting to apply before BLE",
                      s_control.current_version,
                      manifest.firmware_version);
-            influx_upload_enqueue_event("ota_restart", "info", manifest.firmware_version);
             esp_restart();
         }
     }
@@ -428,7 +418,6 @@ static esp_err_t poll_once(uint32_t now_ms)
             return err;
         }
 
-        influx_upload_enqueue_event("restart_requested", "info", manifest.restart_nonce);
         esp_restart();
     }
 
@@ -453,11 +442,10 @@ static void control_task(void *arg)
     }
 }
 
-static esp_err_t configure_control(const influx_config_t *influx_config,
-                                   const control_config_t *control_config,
+static esp_err_t configure_control(const control_config_t *control_config,
                                    const char *current_version)
 {
-    if ((influx_config == NULL) || (control_config == NULL) || (current_version == NULL)) {
+    if ((control_config == NULL) || (current_version == NULL)) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -473,7 +461,7 @@ static esp_err_t configure_control(const influx_config_t *influx_config,
                  sizeof(s_control.manifest_url),
                  "%s/node/%s/manifest",
                  control_config->url,
-                 influx_config->node)
+                 control_config->node)
         >= (int) sizeof(s_control.manifest_url)) {
         return ESP_ERR_INVALID_SIZE;
     }
@@ -488,14 +476,13 @@ static esp_err_t configure_control(const influx_config_t *influx_config,
     return ESP_OK;
 }
 
-esp_err_t control_check_ota_once(const influx_config_t *influx_config,
-                                 const control_config_t *control_config,
+esp_err_t control_check_ota_once(const control_config_t *control_config,
                                  const char *current_version)
 {
     control_manifest_t manifest;
     esp_err_t err;
 
-    err = configure_control(influx_config, control_config, current_version);
+    err = configure_control(control_config, current_version);
     if (err != ESP_OK) {
         return err;
     }
@@ -527,7 +514,6 @@ esp_err_t control_check_ota_once(const influx_config_t *influx_config,
 }
 
 esp_err_t control_init(app_state_t *state,
-                       const influx_config_t *influx_config,
                        const control_config_t *control_config,
                        const char *current_version)
 {
@@ -538,7 +524,7 @@ esp_err_t control_init(app_state_t *state,
         return ESP_ERR_INVALID_ARG;
     }
 
-    err = configure_control(influx_config, control_config, current_version);
+    err = configure_control(control_config, current_version);
     if (err != ESP_OK) {
         return err;
     }
@@ -560,6 +546,5 @@ esp_err_t control_init(app_state_t *state,
         return ESP_ERR_NO_MEM;
     }
 
-    influx_upload_enqueue_event("control_ready", "info", influx_config->node);
     return ESP_OK;
 }

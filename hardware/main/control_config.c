@@ -9,6 +9,7 @@
 #define TAG "control_cfg"
 
 #define CONTROL_NAMESPACE "control"
+#define CONTROL_NODE_KEY "node"
 #define CONTROL_URL_KEY "url"
 #define CONTROL_TOKEN_KEY "token"
 
@@ -54,7 +55,10 @@ esp_err_t control_config_load(control_config_t *config)
         return err;
     }
 
-    err = read_required_string(handle, CONTROL_URL_KEY, config->url, sizeof(config->url));
+    err = read_required_string(handle, CONTROL_NODE_KEY, config->node, sizeof(config->node));
+    if (err == ESP_OK) {
+        err = read_required_string(handle, CONTROL_URL_KEY, config->url, sizeof(config->url));
+    }
     if (err == ESP_OK) {
         err = read_required_string(handle, CONTROL_TOKEN_KEY, config->token, sizeof(config->token));
     }
