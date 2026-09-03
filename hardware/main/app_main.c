@@ -21,6 +21,7 @@
 #define MAIN_LOOP_INTERVAL_MS 1000
 #define HEARTBEAT_INTERVAL_MS 10000
 #define ETHERNET_IP_TIMEOUT_MS 30000
+#define ETHERNET_NO_IP_RESTART_MS (2U * 60U * 1000U)
 #define TIME_SYNC_WAIT_MS 1000
 #define SERVICE_START_RETRY_MS 60000
 #define RETRY_BACKOFF_INITIAL_MS 5000
@@ -103,7 +104,9 @@ void app_main(void)
     uint32_t last_heartbeat_ms = 0;
     uint32_t next_eth_attempt_ms = 0;
     uint32_t next_service_start_attempt_ms = 0;
+    uint32_t no_ip_since_ms = 0;
     uint32_t eth_backoff_ms = 0;
+    bool no_ip_timer_active = false;
     bool ota_check_started = false;
     bool service_config_missing = false;
     ota_check_task_arg_t ota_arg;
@@ -149,6 +152,18 @@ void app_main(void)
         uint32_t now_ms = esp_log_timestamp();
         EventBits_t bits = xEventGroupGetBits(s_app_state.state_event_group);
         bool eth_connected = (bits & ETH_CONNECTED_BIT) != 0;
+
+        if (eth_connected) {
+            no_ip_timer_active = false;
+        } else if (!no_ip_timer_active) {
+            no_ip_since_ms = now_ms;
+            no_ip_timer_active = true;
+        } else if ((now_ms - no_ip_since_ms) >= ETHERNET_NO_IP_RESTART_MS) {
+            ESP_LOGE(TAG,
+                     "No Ethernet IP for %lu ms; restarting",
+                     (unsigned long) ETHERNET_NO_IP_RESTART_MS);
+            esp_restart();
+        }
 
         confirm_ota_boot_if_healthy(&s_app_state, now_ms, OTA_BOOT_CONFIRM_DELAY_MS);
 
