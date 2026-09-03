@@ -247,10 +247,10 @@ static esp_err_t fetch_manifest(control_manifest_t *manifest)
     err = ESP_OK;
 
 cleanup:
+    esp_http_client_cleanup(client);
     if (mutex_locked) {
         xSemaphoreGive(s_control.state->http_mutex);
     }
-    esp_http_client_cleanup(client);
     if (err != ESP_OK) {
         return err;
     }

@@ -5,12 +5,15 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "adv_buffer.h"
 #include "app_state.h"
+#include "ble_scan.h"
 #include "control.h"
 #include "control_config.h"
 #include "ethernet.h"
 #include "ota_boot.h"
 #include "storage.h"
+#include "telemetry_upload.h"
 #include "time_sync.h"
 
 #define TAG "app_main"
@@ -19,7 +22,7 @@
 #define HEARTBEAT_INTERVAL_MS 10000
 #define ETHERNET_IP_TIMEOUT_MS 30000
 #define TIME_SYNC_WAIT_MS 1000
-#define CONTROL_CONFIG_RETRY_MS 60000
+#define SERVICE_START_RETRY_MS 60000
 #define RETRY_BACKOFF_INITIAL_MS 5000
 #define RETRY_BACKOFF_MAX_MS 60000
 #define PROVISIONING_RETRY_MS 60000
@@ -72,6 +75,26 @@ static bool deadline_reached(uint32_t now_ms, uint32_t deadline_ms)
     return (int32_t) (now_ms - deadline_ms) >= 0;
 }
 
+static esp_err_t start_telemetry(app_state_t *state, const control_config_t *config)
+{
+    esp_err_t err;
+
+    err = telemetry_upload_start(state, config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start telemetry uploader: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    err = ble_scan_start();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start BLE scan: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    state->telemetry_started = true;
+    return ESP_OK;
+}
+
 void app_main(void)
 {
     const esp_app_desc_t *app_desc = esp_app_get_description();
@@ -79,10 +102,10 @@ void app_main(void)
     uint32_t heartbeat_counter = 0;
     uint32_t last_heartbeat_ms = 0;
     uint32_t next_eth_attempt_ms = 0;
-    uint32_t next_control_config_attempt_ms = 0;
+    uint32_t next_service_start_attempt_ms = 0;
     uint32_t eth_backoff_ms = 0;
     bool ota_check_started = false;
-    bool control_config_missing = false;
+    bool service_config_missing = false;
     ota_check_task_arg_t ota_arg;
     control_config_t control_config;
     esp_err_t err;
@@ -179,36 +202,66 @@ void app_main(void)
 
         bits = xEventGroupGetBits(s_app_state.state_event_group);
         if (s_app_state.time_synced && ((bits & OTA_CHECK_DONE_BIT) != 0)
-            && !s_app_state.control_started
-            && deadline_reached(now_ms, next_control_config_attempt_ms)) {
+            && (!s_app_state.telemetry_started || !s_app_state.control_started)
+            && deadline_reached(now_ms, next_service_start_attempt_ms)) {
             err = control_config_load(&control_config);
             if (err == ESP_OK) {
-                control_config_missing = false;
-                err = control_init(&s_app_state, &control_config, firmware_version);
-                if (err == ESP_OK) {
-                    s_app_state.control_started = true;
-                    ESP_LOGI(TAG, "Control plane started for node '%s'", control_config.node);
-                } else {
-                    next_control_config_attempt_ms = now_ms + CONTROL_CONFIG_RETRY_MS;
+                service_config_missing = false;
+
+                if (!s_app_state.telemetry_started) {
+                    err = start_telemetry(&s_app_state, &control_config);
+                    if (err == ESP_OK) {
+                        ESP_LOGI(TAG, "Telemetry started for node '%s'", control_config.node);
+                    }
+                }
+
+                if (!s_app_state.control_started) {
+                    err = control_init(&s_app_state, &control_config, firmware_version);
+                    if (err == ESP_OK) {
+                        s_app_state.control_started = true;
+                        ESP_LOGI(TAG, "Control plane started for node '%s'", control_config.node);
+                    } else {
+                        ESP_LOGE(TAG, "Failed to start control plane: %s", esp_err_to_name(err));
+                    }
                 }
             } else {
-                control_config_missing = true;
-                next_control_config_attempt_ms = now_ms + CONTROL_CONFIG_RETRY_MS;
+                service_config_missing = true;
                 ESP_LOGW(TAG,
-                         "Waiting for valid control config, retry in %lu ms",
-                         (unsigned long) CONTROL_CONFIG_RETRY_MS);
+                         "Waiting for valid node config, retry in %lu ms",
+                         (unsigned long) SERVICE_START_RETRY_MS);
+            }
+
+            if (!s_app_state.telemetry_started || !s_app_state.control_started) {
+                next_service_start_attempt_ms = now_ms + SERVICE_START_RETRY_MS;
             }
         }
 
+        if (s_app_state.telemetry_started) {
+            ble_scan_ensure_active();
+        }
+
         if ((now_ms - last_heartbeat_ms) >= HEARTBEAT_INTERVAL_MS) {
+            adv_buffer_metrics_t buffer_metrics = { 0 };
+            telemetry_upload_metrics_t upload_metrics = { 0 };
+
+            adv_buffer_get_metrics(&buffer_metrics);
+            telemetry_upload_get_metrics(&upload_metrics);
             ESP_LOGW(TAG,
-                     "Heartbeat #%lu, heap=%lu, eth=%s, control=%s%s, time=%s",
+                     "Heartbeat #%lu, heap=%lu min_heap=%lu, eth=%s, time=%s, control=%s%s, telemetry=%s%s, adv=%llu/%lu drop=%llu, uploaded=%llu fail=%llu",
                      (unsigned long) heartbeat_counter,
                      (unsigned long) esp_get_free_heap_size(),
+                     (unsigned long) esp_get_minimum_free_heap_size(),
                      eth_connected ? "up" : "down",
+                     s_app_state.time_synced ? "synced" : "waiting",
                      s_app_state.control_started ? "ready" : "waiting",
-                     control_config_missing ? ", unprovisioned" : "",
-                     s_app_state.time_synced ? "synced" : "waiting");
+                     service_config_missing ? ", unprovisioned" : "",
+                     s_app_state.telemetry_started ? "ready" : "waiting",
+                     service_config_missing ? ", unprovisioned" : "",
+                     (unsigned long long) buffer_metrics.packets_seen,
+                     (unsigned long) buffer_metrics.count,
+                     (unsigned long long) buffer_metrics.packets_dropped,
+                     (unsigned long long) upload_metrics.observations_uploaded,
+                     (unsigned long long) upload_metrics.upload_failures);
             heartbeat_counter++;
             last_heartbeat_ms = now_ms;
         }

@@ -14,7 +14,7 @@
 
 typedef struct {
     EventGroupHandle_t state_event_group;
-    SemaphoreHandle_t  http_mutex;
+    SemaphoreHandle_t http_mutex;
     esp_netif_t *eth_netif;
     esp_eth_netif_glue_handle_t eth_glue;
     esp_eth_handle_t eth_handle;
@@ -26,5 +26,6 @@ typedef struct {
     bool ota_pending_verify;
     bool ota_confirmed;
     bool control_started;
+    bool telemetry_started;
     uint32_t boot_time_ms;
 } app_state_t;

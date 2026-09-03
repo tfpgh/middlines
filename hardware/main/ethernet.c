@@ -131,7 +131,7 @@ esp_err_t ethernet_init_once(app_state_t *state)
     return ESP_OK;
 }
 
-esp_err_t ethernet_cleanup(app_state_t *state)
+static esp_err_t ethernet_driver_cleanup(app_state_t *state)
 {
     esp_err_t err;
 
@@ -224,7 +224,7 @@ esp_err_t ethernet_connect(app_state_t *state, uint32_t timeout_ms)
         return wait_for_ip(state, timeout_ms);
     }
 
-    err = ethernet_cleanup(state);
+    err = ethernet_driver_cleanup(state);
     if (err != ESP_OK) {
         return err;
     }
@@ -247,7 +247,7 @@ esp_err_t ethernet_connect(app_state_t *state, uint32_t timeout_ms)
     phy_config.reset_timeout_ms = 1000;
     state->eth_phy = esp_eth_phy_new_lan87xx(&phy_config);
     if (state->eth_phy == NULL) {
-        (void) ethernet_cleanup(state);
+        (void) ethernet_driver_cleanup(state);
         return ESP_ERR_NO_MEM;
     }
 
@@ -256,28 +256,28 @@ esp_err_t ethernet_connect(app_state_t *state, uint32_t timeout_ms)
         &state->eth_handle);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Ethernet driver install failed: %s", esp_err_to_name(err));
-        (void) ethernet_cleanup(state);
+        (void) ethernet_driver_cleanup(state);
         return err;
     }
 
     state->eth_glue = esp_eth_new_netif_glue(state->eth_handle);
     if (state->eth_glue == NULL) {
         ESP_LOGE(TAG, "Failed to create Ethernet netif glue");
-        (void) ethernet_cleanup(state);
+        (void) ethernet_driver_cleanup(state);
         return ESP_ERR_NO_MEM;
     }
 
     err = esp_netif_attach(state->eth_netif, state->eth_glue);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to attach Ethernet netif: %s", esp_err_to_name(err));
-        (void) ethernet_cleanup(state);
+        (void) ethernet_driver_cleanup(state);
         return err;
     }
 
     err = esp_eth_start(state->eth_handle);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Ethernet start failed: %s", esp_err_to_name(err));
-        (void) ethernet_cleanup(state);
+        (void) ethernet_driver_cleanup(state);
         return err;
     }
 

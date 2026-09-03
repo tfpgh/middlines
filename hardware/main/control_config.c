@@ -62,7 +62,6 @@ esp_err_t control_config_load(control_config_t *config)
     if (err == ESP_OK) {
         err = read_required_string(handle, CONTROL_TOKEN_KEY, config->token, sizeof(config->token));
     }
-
     nvs_close(handle);
     return err;
 }

@@ -2,16 +2,18 @@ import hashlib
 import hmac
 import os
 import secrets
-import sqlite3
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from dataclasses import dataclass, replace
+from datetime import datetime
 from html import escape
 from pathlib import Path
-from typing import Annotated, cast
+from typing import Annotated
+from uuid import UUID, uuid4
 
 from fastapi import (
+    Body,
     FastAPI,
     File,
     Form,
@@ -21,97 +23,51 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from loguru import logger
+from store import ClickHouseStore, FirmwareArtifact, NodeCheckin, NodeConfig
+from telemetry import ProtocolError, decode_observations
 
-CONTROL_DATABASE_PATH = "/data/device_control.db"
 ARTIFACTS_DIR = Path("/data/ota")
 
 ADMIN_USERNAME = os.environ.get("MIDDLINES_ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.environ.get("MIDDLINES_ADMIN_PASSWORD", "changeme")
 SESSION_SECRET = os.environ.get("MIDDLINES_SESSION_SECRET", "dev-session-secret")
+CLICKHOUSE_HOST = os.environ.get("MIDDLINES_CLICKHOUSE_HOST", "localhost")
+CLICKHOUSE_PORT = int(os.environ.get("MIDDLINES_CLICKHOUSE_PORT", "8123"))
+CLICKHOUSE_DATABASE = os.environ.get("MIDDLINES_CLICKHOUSE_DATABASE", "middlines")
+CLICKHOUSE_USERNAME = os.environ.get("MIDDLINES_CLICKHOUSE_USERNAME", "default")
+CLICKHOUSE_PASSWORD = os.environ.get("MIDDLINES_CLICKHOUSE_PASSWORD", "")
 
 DEFAULT_NODES = ("ross", "proctor", "atwater")
 DEFAULT_POLL_INTERVAL_S = 300
 SESSION_COOKIE = "middlines_admin"
 PUBLIC_API_PREFIX = "/api"
 
+_store: ClickHouseStore | None = None
 
-def utc_now() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds")
+
+@dataclass(frozen=True, slots=True)
+class AdminNode:
+    node: str
+    token: str
+    poll_interval_s: int
+    current_version: str | None
+    last_seen_at: datetime | None
+    last_ip: str | None
+    restart_nonce: UUID | None
+    target_firmware_sha256: str | None
+    target_version: str | None
 
 
 def ensure_directories() -> None:
     ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def get_control_db_connection() -> sqlite3.Connection:
-    db = sqlite3.connect(CONTROL_DATABASE_PATH, timeout=5.0)
-    db.row_factory = sqlite3.Row
-    return db
-
-
-def init_control_db() -> None:
-    db = get_control_db_connection()
-    db.execute(
-        """
-        CREATE TABLE IF NOT EXISTS nodes (
-            node TEXT PRIMARY KEY,
-            token TEXT NOT NULL DEFAULT '',
-            poll_interval_s INTEGER NOT NULL DEFAULT 300,
-            current_version TEXT,
-            last_seen_at TEXT,
-            last_manifest_fetch_at TEXT,
-            last_ip TEXT,
-            updated_at TEXT NOT NULL
-        )
-        """
-    )
-    db.execute(
-        """
-        CREATE TABLE IF NOT EXISTS firmware_artifacts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            filename TEXT NOT NULL UNIQUE,
-            original_filename TEXT NOT NULL,
-            version TEXT NOT NULL,
-            sha256 TEXT NOT NULL,
-            size_bytes INTEGER NOT NULL,
-            uploaded_at TEXT NOT NULL
-        )
-        """
-    )
-    db.execute(
-        """
-        CREATE TABLE IF NOT EXISTS node_desired_state (
-            node TEXT PRIMARY KEY,
-            target_firmware_id INTEGER,
-            restart_nonce TEXT,
-            updated_at TEXT NOT NULL,
-            FOREIGN KEY(node) REFERENCES nodes(node),
-            FOREIGN KEY(target_firmware_id) REFERENCES firmware_artifacts(id)
-        )
-        """
-    )
-    now = utc_now()
-    for node in DEFAULT_NODES:
-        db.execute(
-            """
-            INSERT INTO nodes (node, updated_at)
-            VALUES (?, ?)
-            ON CONFLICT(node) DO NOTHING
-            """,
-            (node, now),
-        )
-        db.execute(
-            """
-            INSERT INTO node_desired_state (node, updated_at)
-            VALUES (?, ?)
-            ON CONFLICT(node) DO NOTHING
-            """,
-            (node, now),
-        )
-    db.commit()
-    db.close()
+def get_store() -> ClickHouseStore:
+    if _store is None:
+        raise RuntimeError("ClickHouse store is not initialized")
+    return _store
 
 
 def sign_session_value(value: str) -> str:
@@ -197,100 +153,112 @@ def render_admin_shell(title: str, content: str) -> HTMLResponse:
     return html_page(title, body)
 
 
-def fetch_admin_dashboard_data() -> tuple[list[sqlite3.Row], list[sqlite3.Row]]:
-    db = get_control_db_connection()
-    nodes = db.execute(
-        """
-        SELECT n.node, n.token, n.poll_interval_s, n.current_version, n.last_seen_at,
-               n.last_manifest_fetch_at, n.last_ip,
-               ds.restart_nonce, fa.version AS target_version
-        FROM nodes n
-        LEFT JOIN node_desired_state ds ON ds.node = n.node
-        LEFT JOIN firmware_artifacts fa ON fa.id = ds.target_firmware_id
-        ORDER BY n.node
-        """
-    ).fetchall()
-    artifacts = db.execute(
-        """
-        SELECT id, filename, original_filename, version, sha256, size_bytes, uploaded_at
-        FROM firmware_artifacts
-        ORDER BY uploaded_at DESC, id DESC
-        """
-    ).fetchall()
-    db.close()
-    return cast(list[sqlite3.Row], nodes), cast(list[sqlite3.Row], artifacts)
+def fetch_admin_dashboard_data() -> tuple[list[AdminNode], list[FirmwareArtifact]]:
+    store = get_store()
+    artifacts = store.list_firmware_artifacts()
+    artifacts_by_sha256 = artifact_lookup(artifacts)
+    checkins = {item.node: item for item in store.list_latest_node_checkins()}
+    nodes = [
+        build_admin_node(config, checkins.get(config.node), artifacts_by_sha256)
+        for config in store.list_latest_node_configs()
+    ]
+    return nodes, artifacts
 
 
-def fetch_node_detail(node: str) -> tuple[sqlite3.Row, list[sqlite3.Row]]:
-    db = get_control_db_connection()
-    row = db.execute(
-        """
-        SELECT n.node, n.token, n.poll_interval_s, n.current_version, n.last_seen_at,
-               n.last_manifest_fetch_at, n.last_ip,
-               ds.restart_nonce, fa.id AS target_firmware_id, fa.version AS target_version
-        FROM nodes n
-        LEFT JOIN node_desired_state ds ON ds.node = n.node
-        LEFT JOIN firmware_artifacts fa ON fa.id = ds.target_firmware_id
-        WHERE n.node = ?
-        """,
-        (node,),
-    ).fetchone()
-    if row is None:
-        db.close()
+def fetch_node_detail(node: str) -> tuple[AdminNode, list[FirmwareArtifact]]:
+    store = get_store()
+    config = store.get_latest_node_config(node)
+    if config is None:
         raise HTTPException(status_code=404, detail="Unknown node")
-    artifacts = db.execute(
-        """
-        SELECT id, version, filename, sha256, uploaded_at
-        FROM firmware_artifacts
-        ORDER BY uploaded_at DESC, id DESC
-        """
-    ).fetchall()
-    db.close()
-    return row, cast(list[sqlite3.Row], artifacts)
+
+    artifacts = store.list_firmware_artifacts()
+    checkins = {item.node: item for item in store.list_latest_node_checkins()}
+    return build_admin_node(
+        config, checkins.get(node), artifact_lookup(artifacts)
+    ), artifacts
 
 
-def update_node_seen(node: str, version: str | None, client_ip: str | None) -> None:
-    db = get_control_db_connection()
-    db.execute(
-        """
-        UPDATE nodes
-        SET current_version = COALESCE(?, current_version),
-            last_seen_at = ?,
-            last_manifest_fetch_at = ?,
-            last_ip = ?,
-            updated_at = ?
-        WHERE node = ?
-        """,
-        (version or None, utc_now(), utc_now(), client_ip, utc_now(), node),
+def artifact_lookup(
+    artifacts: list[FirmwareArtifact],
+) -> dict[str, FirmwareArtifact]:
+    result: dict[str, FirmwareArtifact] = {}
+    for artifact in artifacts:
+        result.setdefault(artifact.sha256, artifact)
+    return result
+
+
+def build_admin_node(
+    config: NodeConfig,
+    checkin: NodeCheckin | None,
+    artifacts_by_sha256: dict[str, FirmwareArtifact],
+) -> AdminNode:
+    target = (
+        artifacts_by_sha256.get(config.target_firmware_sha256)
+        if config.target_firmware_sha256
+        else None
     )
-    db.commit()
-    db.close()
+    return AdminNode(
+        node=config.node,
+        token=config.token,
+        poll_interval_s=config.poll_interval_s,
+        current_version=(checkin.firmware_version or None) if checkin else None,
+        last_seen_at=checkin.seen_at if checkin else None,
+        last_ip=(checkin.client_ip or None) if checkin else None,
+        restart_nonce=config.restart_nonce,
+        target_firmware_sha256=config.target_firmware_sha256,
+        target_version=target.version if target else None,
+    )
 
 
-def get_node_state(node: str) -> sqlite3.Row | None:
-    db = get_control_db_connection()
-    row = db.execute(
-        """
-        SELECT n.node, n.token, n.poll_interval_s, ds.restart_nonce,
-               fa.version, fa.filename, fa.sha256
-        FROM nodes n
-        LEFT JOIN node_desired_state ds ON ds.node = n.node
-        LEFT JOIN firmware_artifacts fa ON fa.id = ds.target_firmware_id
-        WHERE n.node = ?
-        """,
-        (node,),
-    ).fetchone()
-    db.close()
-    return row
+def format_timestamp(value: datetime | None) -> str:
+    return value.isoformat(timespec="seconds") if value else "never"
+
+
+def require_node_config(node: str) -> NodeConfig:
+    config = get_store().get_latest_node_config(node)
+    if config is None:
+        raise HTTPException(status_code=404, detail="Unknown node")
+    return config
+
+
+def authenticate_node(node: str, authorization: str | None) -> NodeConfig:
+    config = require_node_config(node)
+    if not config.token:
+        raise HTTPException(status_code=403, detail="Node token not configured")
+    if not hmac.compare_digest(authorization or "", f"Bearer {config.token}"):
+        raise HTTPException(status_code=401, detail="Invalid node token")
+    return config
+
+
+def is_sha256(value: str) -> bool:
+    return len(value) == 64 and all(
+        character in "0123456789abcdef" for character in value
+    )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    global _store
+
     ensure_directories()
-    init_control_db()
-    logger.info(f"API starting, control db at {CONTROL_DATABASE_PATH}")
-    yield
-    logger.info("API shutting down")
+    store = ClickHouseStore.connect(
+        host=CLICKHOUSE_HOST,
+        port=CLICKHOUSE_PORT,
+        database=CLICKHOUSE_DATABASE,
+        username=CLICKHOUSE_USERNAME,
+        password=CLICKHOUSE_PASSWORD,
+    )
+    try:
+        store.ensure_nodes(DEFAULT_NODES, DEFAULT_POLL_INTERVAL_S)
+        _store = store
+        logger.info(
+            f"API starting with ClickHouse at {CLICKHOUSE_HOST}:{CLICKHOUSE_PORT}"
+        )
+        yield
+    finally:
+        _store = None
+        store.close()
+        logger.info("API shutting down")
 
 
 app = FastAPI(lifespan=lifespan, root_path="/api")
@@ -309,36 +277,67 @@ def get_node_manifest(
     authorization: Annotated[str | None, Header()] = None,
     x_middlines_version: Annotated[str | None, Header()] = None,
 ) -> dict[str, object | None]:
-    state = get_node_state(node)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Unknown node")
+    store = get_store()
+    config = authenticate_node(node, authorization)
 
-    expected_token = state["token"]
-    if not expected_token:
-        raise HTTPException(status_code=403, detail="Node token not configured")
-
-    if authorization != f"Bearer {expected_token}":
-        raise HTTPException(status_code=401, detail="Invalid node token")
-
-    client_ip = request.headers.get("x-forwarded-for") or (
-        request.client.host if request.client else None
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        client_ip = forwarded_for.partition(",")[0].strip()
+    elif request.client:
+        client_ip = request.client.host
+    else:
+        client_ip = ""
+    store.record_node_checkin(
+        node=node,
+        firmware_version=x_middlines_version or "",
+        client_ip=client_ip,
     )
-    update_node_seen(node, x_middlines_version, client_ip)
 
     firmware = None
-    if state["version"] and state["filename"] and state["sha256"]:
-        firmware = {
-            "version": state["version"],
-            "url": f"https://middlines.com/api/node/artifacts/{state['filename']}",
-            "sha256": state["sha256"],
-        }
+    if config.target_firmware_sha256:
+        artifact = store.get_firmware_artifact(config.target_firmware_sha256)
+        if artifact:
+            firmware = {
+                "version": artifact.version,
+                "url": f"https://middlines.com/api/node/artifacts/{artifact.filename}",
+                "sha256": artifact.sha256,
+            }
+        else:
+            logger.warning(
+                f"Node {node} targets missing firmware {config.target_firmware_sha256}"
+            )
 
     return {
         "node": node,
-        "poll_interval_s": state["poll_interval_s"],
+        "poll_interval_s": config.poll_interval_s,
         "firmware": firmware,
-        "restart_nonce": state["restart_nonce"],
+        "restart_nonce": str(config.restart_nonce) if config.restart_nonce else None,
     }
+
+
+@app.post("/node/{node}/observations", status_code=204)
+def ingest_observations(
+    node: str,
+    payload: Annotated[bytes, Body(media_type="application/octet-stream")],
+    authorization: Annotated[str | None, Header()] = None,
+) -> Response:
+    authenticate_node(node, authorization)
+    try:
+        observations = decode_observations(payload)
+    except ProtocolError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    try:
+        get_store().insert_observations(node, observations)
+    except Exception as error:
+        logger.exception(
+            f"Failed to insert {len(observations)} observations from {node}"
+        )
+        raise HTTPException(
+            status_code=503, detail="Observation insert failed"
+        ) from error
+
+    return Response(status_code=204)
 
 
 @app.get("/node/artifacts/{filename}")
@@ -393,15 +392,15 @@ def admin_dashboard(request: Request) -> HTMLResponse:
     nodes, artifacts = fetch_admin_dashboard_data()
 
     node_rows = "".join(
-        f"<tr><td><a href='{PUBLIC_API_PREFIX}/admin/nodes/{escape(row['node'])}'>{escape(row['node'])}</a></td>"
-        f"<td>{escape(row['current_version'] or 'unknown')}</td>"
-        f"<td>{escape(row['target_version'] or 'none')}</td>"
-        f"<td>{escape(row['last_seen_at'] or 'never')}</td></tr>"
+        f"<tr><td><a href='{PUBLIC_API_PREFIX}/admin/nodes/{escape(row.node)}'>{escape(row.node)}</a></td>"
+        f"<td>{escape(row.current_version or 'unknown')}</td>"
+        f"<td>{escape(row.target_version or 'none')}</td>"
+        f"<td>{escape(format_timestamp(row.last_seen_at))}</td></tr>"
         for row in nodes
     )
     artifact_rows = "".join(
-        f"<tr><td>{escape(row['version'])}</td><td class='mono'>{escape(row['filename'])}</td>"
-        f"<td>{row['size_bytes']}</td><td>{escape(row['uploaded_at'])}</td></tr>"
+        f"<tr><td>{escape(row.version)}</td><td class='mono'>{escape(row.filename)}</td>"
+        f"<td>{row.size_bytes}</td><td>{escape(format_timestamp(row.uploaded_at))}</td></tr>"
         for row in artifacts
     )
 
@@ -439,7 +438,7 @@ def admin_node_detail(request: Request, node: str) -> HTMLResponse:
     require_admin(request)
     detail, artifacts = fetch_node_detail(node)
     artifact_options = "".join(
-        f"<option value='{row['id']}' {'selected' if row['id'] == detail['target_firmware_id'] else ''}>{escape(row['version'])} ({escape(row['filename'])})</option>"
+        f"<option value='{row.sha256}' {'selected' if row.sha256 == detail.target_firmware_sha256 else ''}>{escape(row.version)} ({escape(row.original_filename)})</option>"
         for row in artifacts
     )
     if not artifact_options:
@@ -449,16 +448,15 @@ def admin_node_detail(request: Request, node: str) -> HTMLResponse:
     <div class='grid'>
       <div class='card'>
         <h2>Node {escape(node)}</h2>
-        <p><strong>Current version:</strong> {escape(detail["current_version"] or "unknown")}</p>
-        <p><strong>Last seen:</strong> {escape(detail["last_seen_at"] or "never")}</p>
-        <p><strong>Last manifest fetch:</strong> {escape(detail["last_manifest_fetch_at"] or "never")}</p>
-        <p><strong>Last IP:</strong> {escape(detail["last_ip"] or "unknown")}</p>
-        <p><strong>Target firmware:</strong> {escape(detail["target_version"] or "none")}</p>
+        <p><strong>Current version:</strong> {escape(detail.current_version or "unknown")}</p>
+        <p><strong>Last seen:</strong> {escape(format_timestamp(detail.last_seen_at))}</p>
+        <p><strong>Last IP:</strong> {escape(detail.last_ip or "unknown")}</p>
+        <p><strong>Target firmware:</strong> {escape(detail.target_version or "none")}</p>
       </div>
       <div class='card'>
         <h2>Node Auth</h2>
         <form method='post' action='{PUBLIC_API_PREFIX}/admin/nodes/{escape(node)}/token'>
-          <label>Bearer token<input class='mono' name='token' value='{escape(detail["token"])}'></label>
+          <label>Bearer token<input class='mono' name='token' value='{escape(detail.token)}'></label>
           <div class='row'>
             <button type='submit'>Save token</button>
           </div>
@@ -470,14 +468,14 @@ def admin_node_detail(request: Request, node: str) -> HTMLResponse:
       <div class='card'>
         <h2>Polling</h2>
         <form method='post' action='{PUBLIC_API_PREFIX}/admin/nodes/{escape(node)}/poll-interval'>
-          <label>Poll interval (seconds)<input name='poll_interval_s' type='number' min='30' step='1' value='{detail["poll_interval_s"]}' required></label>
+          <label>Poll interval (seconds)<input name='poll_interval_s' type='number' min='30' max='3600' step='1' value='{detail.poll_interval_s}' required></label>
           <button type='submit'>Save poll interval</button>
         </form>
       </div>
       <div class='card'>
         <h2>OTA Target</h2>
         <form method='post' action='{PUBLIC_API_PREFIX}/admin/nodes/{escape(node)}/target-firmware'>
-          <label>Firmware<select name='firmware_id'>{artifact_options}</select></label>
+          <label>Firmware<select name='firmware_sha256'>{artifact_options}</select></label>
           <button type='submit'>Set target firmware</button>
         </form>
         <form method='post' action='{PUBLIC_API_PREFIX}/admin/nodes/{escape(node)}/target-firmware/clear' style='margin-top:8px;'>
@@ -486,7 +484,7 @@ def admin_node_detail(request: Request, node: str) -> HTMLResponse:
       </div>
       <div class='card'>
         <h2>Restart</h2>
-        <p class='muted'>Current restart nonce: <span class='mono'>{escape(detail["restart_nonce"] or "none")}</span></p>
+        <p class='muted'>Current restart nonce: <span class='mono'>{escape(str(detail.restart_nonce) if detail.restart_nonce else "none")}</span></p>
         <form method='post' action='{PUBLIC_API_PREFIX}/admin/nodes/{escape(node)}/restart'>
           <button type='submit'>Trigger remote restart</button>
         </form>
@@ -503,39 +501,42 @@ async def admin_upload_firmware(
     artifact: Annotated[UploadFile, File()],
 ) -> RedirectResponse:
     require_admin(request)
+    clean_version = version.strip()
+    if not clean_version:
+        raise HTTPException(status_code=400, detail="Firmware version is required")
     cleaned_name = Path(artifact.filename or "firmware.bin").name
-    safe_name = cleaned_name.replace(" ", "-")
-    stored_name = f"{version}-{safe_name}"
-    target_path = ARTIFACTS_DIR / stored_name
+    temporary_path = ARTIFACTS_DIR / f".upload-{uuid4()}.tmp"
     hasher = hashlib.sha256()
     size_bytes = 0
 
-    with target_path.open("wb") as output:
-        while True:
-            chunk = await artifact.read(1024 * 1024)
-            if not chunk:
-                break
-            output.write(chunk)
-            hasher.update(chunk)
-            size_bytes += len(chunk)
+    try:
+        with temporary_path.open("xb") as output:
+            while chunk := await artifact.read(1024 * 1024):
+                output.write(chunk)
+                hasher.update(chunk)
+                size_bytes += len(chunk)
 
-    db = get_control_db_connection()
-    db.execute(
-        """
-        INSERT INTO firmware_artifacts (filename, original_filename, version, sha256, size_bytes, uploaded_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(filename) DO UPDATE SET
-            original_filename = excluded.original_filename,
-            version = excluded.version,
-            sha256 = excluded.sha256,
-            size_bytes = excluded.size_bytes,
-            uploaded_at = excluded.uploaded_at
-        """,
-        (stored_name, cleaned_name, version, hasher.hexdigest(), size_bytes, utc_now()),
-    )
-    db.commit()
-    db.close()
-    return RedirectResponse(f"{PUBLIC_API_PREFIX}/admin", status_code=303)
+        sha256 = hasher.hexdigest()
+        stored_name = f"{sha256}.bin"
+        existing = get_store().get_firmware_artifact(sha256)
+        if existing and existing.version != clean_version:
+            raise HTTPException(
+                status_code=409,
+                detail=f"This binary is already registered as firmware {existing.version}",
+            )
+
+        temporary_path.replace(ARTIFACTS_DIR / stored_name)
+        if not existing:
+            get_store().add_firmware_artifact(
+                sha256=sha256,
+                version=clean_version,
+                filename=stored_name,
+                original_filename=cleaned_name,
+                size_bytes=size_bytes,
+            )
+        return RedirectResponse(f"{PUBLIC_API_PREFIX}/admin", status_code=303)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 @app.post("/admin/nodes/{node}/token")
@@ -545,27 +546,16 @@ def admin_set_node_token(
     token: Annotated[str, Form()],
 ) -> RedirectResponse:
     require_admin(request)
-    db = get_control_db_connection()
-    db.execute(
-        "UPDATE nodes SET token = ?, updated_at = ? WHERE node = ?",
-        (token.strip(), utc_now(), node),
-    )
-    db.commit()
-    db.close()
+    config = require_node_config(node)
+    get_store().append_node_config(replace(config, token=token.strip()))
     return RedirectResponse(f"{PUBLIC_API_PREFIX}/admin/nodes/{node}", status_code=303)
 
 
 @app.post("/admin/nodes/{node}/token/generate")
 def admin_generate_node_token(request: Request, node: str) -> RedirectResponse:
     require_admin(request)
-    token = secrets.token_urlsafe(24)
-    db = get_control_db_connection()
-    db.execute(
-        "UPDATE nodes SET token = ?, updated_at = ? WHERE node = ?",
-        (token, utc_now(), node),
-    )
-    db.commit()
-    db.close()
+    config = require_node_config(node)
+    get_store().append_node_config(replace(config, token=secrets.token_urlsafe(24)))
     return RedirectResponse(f"{PUBLIC_API_PREFIX}/admin/nodes/{node}", status_code=303)
 
 
@@ -576,14 +566,9 @@ def admin_set_poll_interval(
     poll_interval_s: Annotated[int, Form()],
 ) -> RedirectResponse:
     require_admin(request)
-    interval = max(30, poll_interval_s)
-    db = get_control_db_connection()
-    db.execute(
-        "UPDATE nodes SET poll_interval_s = ?, updated_at = ? WHERE node = ?",
-        (interval, utc_now(), node),
-    )
-    db.commit()
-    db.close()
+    config = require_node_config(node)
+    interval = min(3600, max(30, poll_interval_s))
+    get_store().append_node_config(replace(config, poll_interval_s=interval))
     return RedirectResponse(f"{PUBLIC_API_PREFIX}/admin/nodes/{node}", status_code=303)
 
 
@@ -591,41 +576,31 @@ def admin_set_poll_interval(
 def admin_set_target_firmware(
     request: Request,
     node: str,
-    firmware_id: Annotated[str, Form()],
+    firmware_sha256: Annotated[str, Form()],
 ) -> RedirectResponse:
     require_admin(request)
-    firmware_value = int(firmware_id) if firmware_id else None
-    db = get_control_db_connection()
-    db.execute(
-        "UPDATE node_desired_state SET target_firmware_id = ?, updated_at = ? WHERE node = ?",
-        (firmware_value, utc_now(), node),
+    config = require_node_config(node)
+    if not is_sha256(firmware_sha256):
+        raise HTTPException(status_code=400, detail="Invalid firmware SHA-256")
+    if get_store().get_firmware_artifact(firmware_sha256) is None:
+        raise HTTPException(status_code=404, detail="Firmware artifact not found")
+    get_store().append_node_config(
+        replace(config, target_firmware_sha256=firmware_sha256)
     )
-    db.commit()
-    db.close()
     return RedirectResponse(f"{PUBLIC_API_PREFIX}/admin/nodes/{node}", status_code=303)
 
 
 @app.post("/admin/nodes/{node}/target-firmware/clear")
 def admin_clear_target_firmware(request: Request, node: str) -> RedirectResponse:
     require_admin(request)
-    db = get_control_db_connection()
-    db.execute(
-        "UPDATE node_desired_state SET target_firmware_id = NULL, updated_at = ? WHERE node = ?",
-        (utc_now(), node),
-    )
-    db.commit()
-    db.close()
+    config = require_node_config(node)
+    get_store().append_node_config(replace(config, target_firmware_sha256=None))
     return RedirectResponse(f"{PUBLIC_API_PREFIX}/admin/nodes/{node}", status_code=303)
 
 
 @app.post("/admin/nodes/{node}/restart")
 def admin_trigger_restart(request: Request, node: str) -> RedirectResponse:
     require_admin(request)
-    db = get_control_db_connection()
-    db.execute(
-        "UPDATE node_desired_state SET restart_nonce = ?, updated_at = ? WHERE node = ?",
-        (utc_now(), utc_now(), node),
-    )
-    db.commit()
-    db.close()
+    config = require_node_config(node)
+    get_store().append_node_config(replace(config, restart_nonce=uuid4()))
     return RedirectResponse(f"{PUBLIC_API_PREFIX}/admin/nodes/{node}", status_code=303)

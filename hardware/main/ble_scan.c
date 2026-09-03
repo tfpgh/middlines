@@ -32,12 +32,6 @@ static void log_heap_snapshot(const char *context)
              (unsigned long) esp_get_minimum_free_heap_size());
 }
 
-static uint64_t mac_to_u64(const uint8_t addr[6])
-{
-    return ((uint64_t) addr[0] << 40) | ((uint64_t) addr[1] << 32) | ((uint64_t) addr[2] << 24)
-           | ((uint64_t) addr[3] << 16) | ((uint64_t) addr[4] << 8) | (uint64_t) addr[5];
-}
-
 static void start_scan(void)
 {
     uint8_t own_addr_type;
@@ -79,7 +73,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         }
 
         adv.timestamp_us = time_sync_now_us();
-        adv.mac = mac_to_u64(event->disc.addr.val);
+        memcpy(adv.mac, event->disc.addr.val, sizeof(adv.mac));
         adv.rssi = event->disc.rssi;
         adv_buffer_push(&adv);
         return 0;

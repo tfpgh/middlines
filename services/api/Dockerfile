@@ -7,7 +7,7 @@ COPY pyproject.toml ./
 
 RUN uv sync --no-install-project
 
-COPY main.py ./
+COPY main.py store.py telemetry.py ./
 
 RUN uv sync
 

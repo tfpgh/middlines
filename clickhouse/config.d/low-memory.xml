@@ -1,0 +1,8 @@
+<clickhouse>
+    <max_server_memory_usage>3221225472</max_server_memory_usage>
+    <mark_cache_size>536870912</mark_cache_size>
+    <asynchronous_metric_log remove="1" />
+    <metric_log remove="1" />
+    <text_log remove="1" />
+    <trace_log remove="1" />
+</clickhouse>
