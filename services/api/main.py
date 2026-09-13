@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Annotated
 from uuid import UUID, uuid4
 
+from dashboard import LOCATIONS, Dashboard, LocationStatus
 from fastapi import (
     Body,
     FastAPI,
@@ -28,23 +29,17 @@ from loguru import logger
 from store import ClickHouseStore, FirmwareArtifact, NodeCheckin, NodeConfig
 from telemetry import ProtocolError, decode_observations
 
-ARTIFACTS_DIR = Path("/data/ota")
+ARTIFACTS_DIR = Path(os.environ.get("MIDDLINES_ARTIFACTS_DIR", "/data/ota"))
 
 ADMIN_USERNAME = os.environ.get("MIDDLINES_ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.environ.get("MIDDLINES_ADMIN_PASSWORD", "changeme")
 SESSION_SECRET = os.environ.get("MIDDLINES_SESSION_SECRET", "dev-session-secret")
-CLICKHOUSE_HOST = os.environ.get("MIDDLINES_CLICKHOUSE_HOST", "localhost")
-CLICKHOUSE_PORT = int(os.environ.get("MIDDLINES_CLICKHOUSE_PORT", "8123"))
-CLICKHOUSE_DATABASE = os.environ.get("MIDDLINES_CLICKHOUSE_DATABASE", "middlines")
-CLICKHOUSE_USERNAME = os.environ.get("MIDDLINES_CLICKHOUSE_USERNAME", "default")
-CLICKHOUSE_PASSWORD = os.environ.get("MIDDLINES_CLICKHOUSE_PASSWORD", "")
-
-DEFAULT_NODES = ("ross", "proctor", "atwater")
 DEFAULT_POLL_INTERVAL_S = 300
 SESSION_COOKIE = "middlines_admin"
 PUBLIC_API_PREFIX = "/api"
 
 _store: ClickHouseStore | None = None
+_dashboard: Dashboard | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,25 +233,19 @@ def is_sha256(value: str) -> bool:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    global _store
+    global _store, _dashboard
 
     ensure_directories()
-    store = ClickHouseStore.connect(
-        host=CLICKHOUSE_HOST,
-        port=CLICKHOUSE_PORT,
-        database=CLICKHOUSE_DATABASE,
-        username=CLICKHOUSE_USERNAME,
-        password=CLICKHOUSE_PASSWORD,
-    )
+    store = ClickHouseStore.from_env()
     try:
-        store.ensure_nodes(DEFAULT_NODES, DEFAULT_POLL_INTERVAL_S)
+        store.ensure_nodes(LOCATIONS, DEFAULT_POLL_INTERVAL_S)
         _store = store
-        logger.info(
-            f"API starting with ClickHouse at {CLICKHOUSE_HOST}:{CLICKHOUSE_PORT}"
-        )
+        _dashboard = Dashboard(store)
+        logger.info("API starting with ClickHouse")
         yield
     finally:
         _store = None
+        _dashboard = None
         store.close()
         logger.info("API shutting down")
 
@@ -268,6 +257,20 @@ app.add_middleware(GZipMiddleware)
 @app.get("/health")
 def health() -> str:
     return "Ok"
+
+
+@app.get("/current", tags=["dashboard"])
+def get_current(response: Response) -> list[LocationStatus]:
+    response.headers["Cache-Control"] = "no-store"
+    if _dashboard is None:
+        raise HTTPException(status_code=503, detail="Dashboard is not initialized")
+    try:
+        return _dashboard.current()
+    except Exception as exc:
+        logger.exception("Failed to load dashboard")
+        raise HTTPException(
+            status_code=503, detail="Dining hall data temporarily unavailable"
+        ) from exc
 
 
 @app.get("/node/{node}/manifest")

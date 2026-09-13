@@ -1,14 +1,15 @@
-import path from "path"
-import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
+import path from "path";
+import { defineConfig, loadEnv } from "vite";
+import react from "@vitejs/plugin-react";
 
-// https://vite.dev/config/
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   plugins: [react()],
   server: {
     proxy: {
-      '/api': {
-        target: 'https://middlines.com',
+      "/api": {
+        target:
+          loadEnv(mode, process.cwd(), "").MIDDLINES_API_URL ||
+          "http://localhost:8000",
         changeOrigin: true,
       },
     },
@@ -18,4 +19,4 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
-})
+}));

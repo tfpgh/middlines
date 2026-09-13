@@ -4,6 +4,8 @@
  * FastAPI
  * OpenAPI spec version: 0.1.0
  */
+import type { LocationStatusTimestamp } from './locationStatusTimestamp';
+import type { Status } from './status';
 import type { LocationStatusBusynessPercentage } from './locationStatusBusynessPercentage';
 import type { LocationStatusVsTypicalPercentage } from './locationStatusVsTypicalPercentage';
 import type { LocationStatusTrend } from './locationStatusTrend';
@@ -11,7 +13,8 @@ import type { DataPoint } from './dataPoint';
 
 export interface LocationStatus {
   location: string;
-  timestamp: string;
+  timestamp: LocationStatusTimestamp;
+  status: Status;
   busyness_percentage: LocationStatusBusynessPercentage;
   vs_typical_percentage: LocationStatusVsTypicalPercentage;
   trend: LocationStatusTrend;

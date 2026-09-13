@@ -1,6 +1,6 @@
-import type { LocationStatusTrend } from "@/api/generated/models";
+import type { LocationStatus } from "@/api/generated/models";
 
-export function getTrendEmoji(trend: LocationStatusTrend): string {
+export function getTrendEmoji(trend: LocationStatus["trend"]): string {
   switch (trend) {
     case "Increasing":
       return "↗";
@@ -13,6 +13,6 @@ export function getTrendEmoji(trend: LocationStatusTrend): string {
   }
 }
 
-export function getTrendLabel(trend: LocationStatusTrend): string {
+export function getTrendLabel(trend: LocationStatus["trend"]): string {
   return trend ?? "Unknown";
 }

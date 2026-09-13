@@ -48,8 +48,10 @@ export function InfoDialog() {
               We have sensors in each dining hall that monitor the relative
               amount of Bluetooth traffic from students&apos; phones, laptops,
               AirPods, and other devices to estimate how busy things are. We
-              don't track any information about these devices, just their
-              presence.
+              store timestamped Bluetooth device identifiers and signal strength
+              to calculate activity. The public dashboard only shows aggregate
+              estimates, not device identifiers. Percentages reflect activity
+              relative to this hall's recent history, not a measured occupancy.
             </p>
           </div>
           <div>

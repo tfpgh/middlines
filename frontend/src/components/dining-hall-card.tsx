@@ -1,116 +1,145 @@
-import { useState } from "react";
+import { lazy, Suspense, useId, useState } from "react";
 import type { LocationStatus } from "@/api/generated/models";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { getBusynessBorderClasses } from "@/lib/busyness-colors";
 import { getTrendEmoji, getTrendLabel } from "@/lib/trend-helpers";
-import { BusynessChart } from "@/components/busyness-chart";
+import { formatReadingTime, isReadingStale } from "@/lib/time";
 import { ChevronDown, ChevronUp } from "lucide-react";
+
+const BusynessChart = lazy(() =>
+  import("@/components/busyness-chart").then((module) => ({
+    default: module.BusynessChart,
+  })),
+);
 
 interface DiningHallCardProps {
   location: LocationStatus;
+  now: number;
 }
 
-export function DiningHallCard({ location }: DiningHallCardProps) {
+export function DiningHallCard({ location, now }: DiningHallCardProps) {
   const [isExpanded, setIsExpanded] = useState(false);
-
+  const chartId = useId();
   const {
-    location: name,
     busyness_percentage,
     vs_typical_percentage,
     trend,
     today_data,
+    timestamp,
   } = location;
-
-  const borderClasses = getBusynessBorderClasses(busyness_percentage);
-  const trendEmoji = getTrendEmoji(trend);
+  const status = isReadingStale(timestamp, now) ? "stale" : location.status;
+  const percentage = status === "active" ? busyness_percentage : null;
+  const hasHistory = today_data.some(
+    (point) => point.busyness_percentage !== null,
+  );
   const trendLabel = getTrendLabel(trend);
-  const isClosed = busyness_percentage === null;
-  const hasHistoricalData = today_data.some(d => d.busyness_percentage !== null);
-  const isInteractive = !isClosed || hasHistoricalData;
+  const statusText =
+    status === "closed"
+      ? "Closed"
+      : status === "stale"
+        ? "Data delayed"
+        : "Unavailable";
+  const comparisonClasses =
+    vs_typical_percentage !== null && vs_typical_percentage >= 5
+      ? "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200"
+      : vs_typical_percentage !== null && vs_typical_percentage <= -5
+        ? "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
+        : "bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200";
 
   return (
     <Card
-      className={`${borderClasses} transition-all duration-300 ease-in-out ${isInteractive ? 'cursor-pointer hover:shadow-lg' : ''}`}
-      onClick={() => isInteractive && setIsExpanded(!isExpanded)}
+      className={getBusynessBorderClasses(percentage) + " transition-colors"}
     >
       <CardHeader>
-        <div className="flex items-center justify-between">
-          <CardTitle className="text-xl">{name}</CardTitle>
-          {isInteractive && (
-            isExpanded ? (
-              <ChevronUp className="h-5 w-5 text-muted-foreground transition-transform" />
+        <button
+          type="button"
+          className="flex w-full items-center justify-between text-left rounded-sm focus-visible:outline-2 focus-visible:outline-offset-4"
+          disabled={!hasHistory}
+          aria-expanded={isExpanded}
+          aria-controls={chartId}
+          onClick={() => setIsExpanded((expanded) => !expanded)}
+        >
+          <CardTitle className="text-xl">{location.location}</CardTitle>
+          {hasHistory &&
+            (isExpanded ? (
+              <ChevronUp className="h-5 w-5" />
             ) : (
-              <ChevronDown className="h-5 w-5 text-muted-foreground transition-transform" />
-            )
-          )}
-        </div>
+              <ChevronDown className="h-5 w-5" />
+            ))}
+        </button>
       </CardHeader>
-
       <CardContent>
         <div className="space-y-3">
-          {/* Busyness percentage display */}
           <div className="text-center">
-            {isClosed ? (
-              <div className="text-4xl font-bold text-muted-foreground">
-                Closed
+            {percentage !== null ? (
+              <div className="text-6xl font-bold tabular-nums">
+                {Math.round(percentage)}%
               </div>
             ) : (
-              <div className="text-6xl font-bold tabular-nums">
-                {Math.round(busyness_percentage!)}%
+              <div className="text-4xl font-bold text-muted-foreground">
+                {statusText}
               </div>
             )}
           </div>
-
-          {/* Vs Typical & Trend Row */}
-          {!isClosed && (
+          {percentage !== null && (
             <div className="flex items-center justify-between text-sm">
-              {/* Vs Typical Badge */}
               <div>
                 {vs_typical_percentage !== null && (
                   <span
-                    className={`inline-flex items-center px-2.5 py-0.5 rounded-full font-medium ${
-                      vs_typical_percentage >= 5
-                        ? "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200"
-                        : vs_typical_percentage <= -5
-                          ? "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
-                          : "bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200"
-                    }`}
+                    className={
+                      "inline-flex items-center px-2.5 py-0.5 rounded-full font-medium " +
+                      comparisonClasses
+                    }
                   >
                     {vs_typical_percentage > 0 ? "+" : ""}
                     {Math.round(vs_typical_percentage)}% vs typical
                   </span>
                 )}
               </div>
-
-              {/* Trend Indicator */}
-              <div className="flex items-center gap-1 text-muted-foreground">
-                <span className="text-lg" aria-label={trendLabel}>
-                  {trendEmoji}
-                </span>
-                <span className="text-xs uppercase tracking-wider">
-                  {trendLabel}
-                </span>
-              </div>
+              {trend !== null && (
+                <div
+                  className="flex items-center gap-1 text-muted-foreground"
+                  title="Change over the last five minutes"
+                >
+                  <span className="text-lg" aria-label={trendLabel}>
+                    {getTrendEmoji(trend)}
+                  </span>
+                  <span className="text-xs uppercase tracking-wider">
+                    {trendLabel}
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+          <p className="text-center text-xs text-muted-foreground">
+            {timestamp ? (
+              <>
+                Last reading{" "}
+                <time dateTime={timestamp}>{formatReadingTime(timestamp)}</time>
+              </>
+            ) : (
+              "No readings available yet"
+            )}
+          </p>
+        </div>
+        <div id={chartId} hidden={!isExpanded}>
+          {isExpanded && hasHistory && (
+            <div className="-mx-2 pt-5 mt-4 border-t overflow-hidden">
+              <p className="text-sm text-muted-foreground mb-3 px-2">
+                Today's activity
+              </p>
+              <Suspense
+                fallback={
+                  <div className="h-36 sm:h-44 text-sm text-muted-foreground">
+                    Loading chart…
+                  </div>
+                }
+              >
+                <BusynessChart data={today_data} />
+              </Suspense>
             </div>
           )}
         </div>
-
-        {/* Expanded Chart */}
-        {isExpanded && hasHistoricalData && (
-          <div className="-mx-2 pt-5 mt-4 border-t overflow-hidden">
-            {isClosed && (
-              <p className="text-sm text-muted-foreground mb-3 px-2">Today's Activity</p>
-            )}
-            <BusynessChart data={today_data} />
-          </div>
-        )}
-
-        {/* Empty state when expanded but no data */}
-        {isExpanded && !hasHistoricalData && (
-          <div className="pt-5 mt-4 pb-2 border-t text-center text-sm text-muted-foreground">
-            No activity data available yet
-          </div>
-        )}
       </CardContent>
     </Card>
   );

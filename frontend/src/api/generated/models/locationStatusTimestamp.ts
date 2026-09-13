@@ -4,6 +4,5 @@
  * FastAPI
  * OpenAPI spec version: 0.1.0
  */
-import type { Trend } from './trend';
 
-export type LocationStatusTrend = Trend | null;
+export type LocationStatusTimestamp = string | null;

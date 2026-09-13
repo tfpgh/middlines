@@ -1,11 +1,13 @@
+import os
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Self, cast
 from uuid import UUID
 
 import clickhouse_connect
 from clickhouse_connect.driver.client import Client
+from dashboard import MinuteCount
 
 _FIXED_STRING_FORMAT = {"FixedString": "string"}
 
@@ -42,6 +44,16 @@ class ClickHouseStore:
         self._client = client
 
     @classmethod
+    def from_env(cls) -> Self:
+        return cls.connect(
+            host=os.environ.get("MIDDLINES_CLICKHOUSE_HOST", "localhost"),
+            port=int(os.environ.get("MIDDLINES_CLICKHOUSE_PORT", "8123")),
+            database=os.environ.get("MIDDLINES_CLICKHOUSE_DATABASE", "middlines"),
+            username=os.environ.get("MIDDLINES_CLICKHOUSE_USERNAME", "default"),
+            password=os.environ.get("MIDDLINES_CLICKHOUSE_PASSWORD", ""),
+        )
+
+    @classmethod
     def connect(
         cls,
         *,
@@ -67,6 +79,55 @@ class ClickHouseStore:
 
     def close(self) -> None:
         self._client.close()
+
+    def read_minute_counts(
+        self, nodes: Sequence[str], start: datetime, end: datetime
+    ) -> list[MinuteCount]:
+        # Exact states are much larger than scalar counts. Bound both read blocks
+        # and each ordered-aggregation buffer, including with unmerged parts.
+        rows = self._query_rows(
+            """
+            SELECT node, bucket, uniqExactMerge(devices), max(last_observed_at)
+            FROM device_counts_1m
+            WHERE node IN {nodes:Array(String)}
+              AND bucket >= {start:DateTime('UTC')}
+              AND bucket < {end:DateTime('UTC')}
+            GROUP BY node, bucket
+            ORDER BY node, bucket
+            SETTINGS optimize_aggregation_in_order = 1,
+                     aggregation_in_order_max_block_bytes = 262144,
+                     max_block_size = 128,
+                     max_memory_usage = 536870912, max_execution_time = 8
+            """,
+            {"nodes": list(nodes), "start": start, "end": end},
+        )
+        return [
+            MinuteCount(
+                cast(str, row[0]),
+                cast(datetime, row[1]).astimezone(UTC),
+                cast(int, row[2]),
+                cast(datetime, row[3]).astimezone(UTC),
+            )
+            for row in rows
+        ]
+
+    def backfill_minute_counts(self, start: datetime, end: datetime) -> None:
+        # Set union and maximum make retries and overlap with the live view safe.
+        self._client.command(  # pyright: ignore[reportUnknownMemberType]
+            """
+            INSERT INTO device_counts_1m
+            SELECT node,
+                   toDateTime(toStartOfMinute(observed_at), 'UTC') AS bucket,
+                   uniqExactState(mac), max(observed_at)
+            FROM observations_raw
+            WHERE observed_at >= {start:DateTime64(3, 'UTC')}
+              AND observed_at < {end:DateTime64(3, 'UTC')}
+              AND rssi >= -120
+            GROUP BY node, bucket
+            SETTINGS max_threads = 1, max_memory_usage = 536870912
+            """,
+            parameters={"start": start, "end": end},
+        )
 
     def ensure_nodes(self, nodes: Iterable[str], default_poll_interval_s: int) -> None:
         existing = {config.node for config in self.list_latest_node_configs()}

@@ -7,7 +7,7 @@ COPY pyproject.toml ./
 
 RUN uv sync --no-install-project
 
-COPY main.py store.py telemetry.py ./
+COPY main.py store.py telemetry.py dashboard.py backfill.py ./
 
 RUN uv sync
 

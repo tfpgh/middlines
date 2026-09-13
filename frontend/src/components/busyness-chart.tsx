@@ -1,91 +1,83 @@
-import type { DataPoint } from '@/api/generated/models'
-import { ChartContainer, ChartTooltip } from '@/components/ui/chart'
-import { LineChart, Line, XAxis, ResponsiveContainer } from 'recharts'
-import { filterNonClosedData, formatTimeForChart } from '@/lib/data-filters'
-import { useTheme } from '@/components/theme-provider'
+import type { DataPoint } from "@/api/generated/models";
+import {
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  ResponsiveContainer,
+  Tooltip,
+} from "recharts";
+import { formatTimeForChart } from "@/lib/time";
 
-interface BusynessChartProps {
-  data: DataPoint[]
-}
-
-export function BusynessChart({ data }: BusynessChartProps) {
-  const { theme } = useTheme()
-  const isDark = theme === 'dark' || (theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches)
-
-  // Light mode: darker blue for contrast, Dark mode: lighter blue for visibility
-  const lineColor = isDark ? '#60a5fa' : '#2563eb'
-
-  const filteredData = filterNonClosedData(data)
-
-  if (filteredData.length === 0) {
+export function BusynessChart({ data }: { data: DataPoint[] }) {
+  const first = data.findIndex((point) => point.busyness_percentage !== null);
+  if (first === -1)
     return (
-      <div className="h-64 flex items-center justify-center text-muted-foreground">
-        No data available
-      </div>
-    )
-  }
+      <p className="text-sm text-muted-foreground">
+        No activity data available yet
+      </p>
+    );
 
-  const chartData = filteredData.map((point) => ({
-    time: formatTimeForChart(point.timestamp),
-    timestamp: point.timestamp,
+  // Trim only leading empty time; retain gaps within the day's activity.
+  const points = data.slice(first).map((point) => ({
+    time: Date.parse(point.timestamp),
     busyness: point.busyness_percentage,
-  }))
+  }));
 
   return (
-    <div className="h-36 sm:h-44 w-full">
-      <ChartContainer
-        config={{
-          busyness: {
-            label: 'Busyness',
-            color: lineColor,
-          },
-        }}
-      >
-        <ResponsiveContainer width="100%" height="100%">
-          <LineChart
-            data={chartData}
-            margin={{ top: 5, right: 5, bottom: 20, left: 5 }}
-          >
-            <XAxis
-              dataKey="time"
-              tick={{ fontSize: 11, fill: 'currentColor' }}
-              tickLine={false}
-              axisLine={false}
-              interval="preserveStartEnd"
-              className="text-muted-foreground"
-              height={20}
-            />
-            <ChartTooltip
-              content={({ active, payload }) => {
-                if (!active || !payload?.length) return null
-                const data = payload[0]
-                const percentage = Math.round(data.value as number)
-                const time = data.payload.time
-                return (
-                  <div className="bg-background border border-border/50 rounded-lg px-3 py-2 shadow-xl">
-                    <div className="text-sm font-semibold">
-                      {percentage}%
-                    </div>
-                    <div className="text-xs text-muted-foreground">
-                      {time}
-                    </div>
+    <div
+      className="h-36 sm:h-44 w-full"
+      role="img"
+      aria-label="Today's smoothed busyness in Eastern time; gaps indicate unavailable or closed periods"
+    >
+      <ResponsiveContainer width="100%" height="100%">
+        <LineChart
+          data={points}
+          margin={{ top: 5, right: 5, bottom: 20, left: 5 }}
+        >
+          <XAxis
+            dataKey="time"
+            type="number"
+            scale="time"
+            domain={["dataMin", "dataMax"]}
+            tickFormatter={formatTimeForChart}
+            tick={{ fontSize: 11, fill: "currentColor" }}
+            tickLine={false}
+            axisLine={false}
+            interval="preserveStartEnd"
+            height={20}
+          />
+          <YAxis hide domain={[0, 100]} />
+          <Tooltip
+            content={({ active, payload, label }) => {
+              const value = payload?.[0]?.value;
+              if (!active || typeof value !== "number" || label === undefined)
+                return null;
+              return (
+                <div className="bg-background border border-border/50 rounded-lg px-3 py-2 shadow-xl">
+                  <div className="text-sm font-semibold">
+                    {Math.round(value)}%
                   </div>
-                )
-              }}
-            />
-            <Line
-              type="monotone"
-              dataKey="busyness"
-              stroke={lineColor}
-              strokeWidth={3}
-              dot={false}
-              activeDot={{ r: 5 }}
-              animationDuration={250}
-              isAnimationActive={true}
-            />
-          </LineChart>
-        </ResponsiveContainer>
-      </ChartContainer>
+                  <div className="text-xs text-muted-foreground">
+                    {formatTimeForChart(Number(label))} ET
+                  </div>
+                </div>
+              );
+            }}
+          />
+          <Line
+            type="monotone"
+            dataKey="busyness"
+            stroke="currentColor"
+            className="text-blue-600 dark:text-blue-400"
+            strokeWidth={3}
+            dot={false}
+            activeDot={{ r: 5 }}
+            connectNulls={false}
+            isAnimationActive={false}
+          />
+        </LineChart>
+      </ResponsiveContainer>
     </div>
-  )
+  );
 }

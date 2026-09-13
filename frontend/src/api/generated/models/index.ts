@@ -9,5 +9,8 @@ export * from './dataPoint';
 export * from './dataPointBusynessPercentage';
 export * from './locationStatus';
 export * from './locationStatusBusynessPercentage';
+export * from './locationStatusTimestamp';
 export * from './locationStatusTrend';
 export * from './locationStatusVsTypicalPercentage';
+export * from './status';
+export * from './trend';

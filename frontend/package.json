@@ -9,7 +9,7 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "generate:api": "cd .. && docker compose up -d api && sleep 3 && cd frontend && orval && cd .. && docker compose stop api"
+    "generate:api": "orval"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.15",
