@@ -3,7 +3,7 @@ import type { LocationStatus } from "@/api/generated/models";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { getBusynessBorderClasses } from "@/lib/busyness-colors";
 import { getTrendEmoji, getTrendLabel } from "@/lib/trend-helpers";
-import { formatReadingTime, isReadingStale } from "@/lib/time";
+import { isReadingStale } from "@/lib/time";
 import { ChevronDown, ChevronUp } from "lucide-react";
 
 const BusynessChart = lazy(() =>
@@ -111,23 +111,10 @@ export function DiningHallCard({ location, now }: DiningHallCardProps) {
               )}
             </div>
           )}
-          <p className="text-center text-xs text-muted-foreground">
-            {timestamp ? (
-              <>
-                Last reading{" "}
-                <time dateTime={timestamp}>{formatReadingTime(timestamp)}</time>
-              </>
-            ) : (
-              "No readings available yet"
-            )}
-          </p>
         </div>
         <div id={chartId} hidden={!isExpanded}>
           {isExpanded && hasHistory && (
             <div className="-mx-2 pt-5 mt-4 border-t overflow-hidden">
-              <p className="text-sm text-muted-foreground mb-3 px-2">
-                Today's activity
-              </p>
               <Suspense
                 fallback={
                   <div className="h-36 sm:h-44 text-sm text-muted-foreground">

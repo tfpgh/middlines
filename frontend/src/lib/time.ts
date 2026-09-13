@@ -4,21 +4,8 @@ const chartTime = new Intl.DateTimeFormat("en-US", {
   minute: "2-digit",
 });
 
-const readingTime = new Intl.DateTimeFormat("en-US", {
-  timeZone: "America/New_York",
-  month: "short",
-  day: "numeric",
-  hour: "numeric",
-  minute: "2-digit",
-  timeZoneName: "short",
-});
-
 export function formatTimeForChart(timestamp: string | number): string {
   return chartTime.format(new Date(timestamp));
-}
-
-export function formatReadingTime(timestamp: string): string {
-  return readingTime.format(new Date(timestamp));
 }
 
 export function isReadingStale(timestamp: string | null, now: number): boolean {
