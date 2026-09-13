@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 from pydantic import BaseModel
 
 TIMEZONE = ZoneInfo("America/New_York")
-LOCATIONS = {"atwater": "Atwater", "proctor": "Proctor", "ross": "Ross"}
+LOCATIONS = {"atwater": "Atwater", "proctor": "Proctor", "ross": "Ross", "test": "Test"}
 MINUTE = timedelta(minutes=1)
 WARMUP = timedelta(hours=1)
 LOOKBACK = timedelta(days=45)

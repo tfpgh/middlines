@@ -186,12 +186,12 @@ class DashboardTests(unittest.TestCase):
             self.store, clock=lambda: self.now, timer=lambda: self.elapsed
         )
 
-    def test_three_halls_cache_lifetimes_and_bounds(self) -> None:
+    def test_locations_cache_lifetimes_and_bounds(self) -> None:
         response = self.dashboard.current()
         self.assertEqual(
-            [hall.location for hall in response], ["Atwater", "Proctor", "Ross"]
+            [hall.location for hall in response], ["Atwater", "Proctor", "Ross", "Test"]
         )
-        self.assertEqual(response[-1].status, "active")
+        self.assertEqual(response[2].status, "active")
         self.assertEqual(response[0].status, "unavailable")
         self.assertIsNone(response[0].timestamp)
         self.assertIs(self.dashboard.current(), response)
@@ -216,12 +216,29 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(len(self.store.calls), 2)
         self.assertTrue(all(result is results[0] for result in results))
 
+    def test_test_node_readings_reach_dashboard(self) -> None:
+        end = eligible_end(self.now)
+        self.store.rows.extend(
+            reading(end - MINUTE * i, 100 + (6 - i) * 5, node="test")
+            for i in range(6, 0, -1)
+        )
+        location = next(
+            item for item in self.dashboard.current() if item.location == "Test"
+        )
+        self.assertEqual(location.status, "active")
+        self.assertEqual(location.timestamp, end - timedelta(seconds=10))
+        self.assertIsNotNone(location.busyness_percentage)
+        self.assertEqual(location.trend, "Increasing")
+        self.assertEqual(
+            location.today_data[-1].busyness_percentage, location.busyness_percentage
+        )
+
     def test_failed_rebuild_is_retried(self) -> None:
         self.store.fail = True
         with self.assertRaises(RuntimeError):
             self.dashboard.current()
         self.store.fail = False
-        self.assertEqual(self.dashboard.current()[-1].status, "active")
+        self.assertEqual(self.dashboard.current()[2].status, "active")
         self.assertEqual(len(self.store.calls), 3)
 
     def test_partial_rebuild_does_not_publish_calibration(self) -> None:
@@ -247,7 +264,10 @@ class DashboardTests(unittest.TestCase):
             response = client.get("/current")
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.headers["cache-control"], "no-store")
-            self.assertEqual(len(response.json()), 3)
+            self.assertEqual(
+                [item["location"] for item in response.json()],
+                ["Atwater", "Proctor", "Ross", "Test"],
+            )
             self.assertNotIn("mac", response.text)
             self.assertNotIn("devices", response.text)
             self.now += MINUTE
